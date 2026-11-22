@@ -130,11 +130,13 @@ Assembled execution DAG and coordinate-enriched record schema for ClickHouse per
 - **Protocol**: Native TCP Protocol (`native_client.py` via `asynch` / `clickhouse-driver`), zero HTTP/single-insert operations.
 - **Two-Tier Micro-Batch Flush**: Flush synchronously via native TCP strictly upon reaching **`50,000` records** OR **`2.0` seconds** (whichever occurs first); do not use `async_insert=1` unless a ClickHouse 24.3+ async deduplication (`async_insert_deduplicate=1`, `wait_for_async_insert=1`) and recovery contract is explicitly established. Enable `insert_deduplicate=1` and require WAL/restart recovery to preserve each block's exact contents, boundaries, and row order; `insert_deduplicate=1` alone does not suppress duplicates when replayed rows are regrouped into different batches, so downstream queries must also deduplicate by `(tenant_id, event_date, trace_id)`.
 - **Engine, Partitioning & Tables**:
-  - **Primary Table (`rag_trace_dags`)**: `ReplicatedMergeTree`
+  - **Primary Table (`rag_trace_dags`)**: `ReplicatedMergeTree` (with `ZSTD(1)` / `Delta` / `T64` / `Gorilla` column codecs and `SETTINGS index_granularity = 8192`)
   - **Partition By**: `toYYYYMM(event_date)`
   - **Order By**: `(tenant_id, event_date, trace_id)`
   - **Core Columns**: `tenant_id LowCardinality(String)`, `event_date Date`, `trace_id String`, `is_partial UInt8`, `total_duration_ms Float64`, `nodes Nested(...)`, `eval_tags Map(String, String)`, `created_at DateTime64(3, 'UTC')`.
-- **Downstream Handoff**: Materialized view (`rag_eval_candidates_mv`) projects evaluation-tagged traces for `rag-eval-worker` / `rag-eval-governance-worker` offline polling.
+  - **Evaluation Candidates Table (`rag_eval_candidates`)**: `ReplicatedReplacingMergeTree(created_at)` partitioned by `toYYYYMM(event_date)`, ordered by `(tenant_id, event_date, trace_id)`.
+- **Downstream Handoff**: Materialized view (`rag_eval_candidates_mv`) projects evaluation-tagged traces (`WHERE notEmpty(eval_tags)`) into `rag_eval_candidates` for `rag-eval-worker` / `rag-eval-governance-worker` offline polling.
+- **Tenant Isolation**: Shared-table reads are restricted via ClickHouse Row Policies (`CREATE ROW POLICY ... ON rag_trace_dags FOR SELECT USING tenant_id = '<tenant_id>' TO <role>`).
 
 ---
 
