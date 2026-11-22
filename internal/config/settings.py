@@ -71,6 +71,12 @@ class WorkerSettings(BaseSettings):
     clickhouse_password: SecretStr | None = Field(default=None)
     clickhouse_tls_enabled: bool = Field(default=False)
     clickhouse_ssl_cafile: str | None = Field(default=None)
+    clickhouse_connect_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
+    clickhouse_send_receive_timeout_seconds: float = Field(default=10.0, gt=0.0, le=300.0)
+    clickhouse_insert_deduplicate: bool = Field(default=True)
+    clickhouse_async_insert: bool = Field(default=False)
+    clickhouse_replicated: bool = Field(default=True)
+    clickhouse_cluster_name: str = Field(default="rag_cluster", min_length=1)
 
     # Time-wheel, micro-batching & local disk WAL
     timewheel_expiry_seconds: float = Field(default=1.5, gt=0.0, le=60.0)
@@ -78,7 +84,10 @@ class WorkerSettings(BaseSettings):
     timewheel_max_open_traces: int = Field(default=25_000, ge=100, le=500_000)
     batch_max_rows: int = Field(default=50_000, ge=1, le=500_000)
     batch_flush_interval_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
+    batch_max_pending_batches: int = Field(default=4, ge=1, le=64)
     disk_wal_dir: str = Field(default="/var/spool/trace-wal", min_length=1)
+    disk_wal_max_bytes: int = Field(default=536_870_912, ge=65_536, le=10_737_418_240)
+    disk_wal_drain_interval_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
 
     # Telemetry & logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(default="INFO")
@@ -121,5 +130,11 @@ class WorkerSettings(BaseSettings):
 
         if self.timewheel_expiry_seconds * 1000.0 < self.timewheel_tick_ms:
             raise ValueError("timewheel_expiry_seconds * 1000 must be >= timewheel_tick_ms")
+
+        if self.clickhouse_async_insert:
+            raise ValueError(
+                "clickhouse_async_insert=True is disabled; synchronous native TCP with "
+                "insert_deduplicate=1 is required"
+            )
 
         return self

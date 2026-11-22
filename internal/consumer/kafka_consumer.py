@@ -21,9 +21,11 @@ from api.proto.v1.trace_record_pb2 import TraceSpanRecord
 from internal.config.settings import WorkerSettings
 from internal.consumer.offset_manager import OffsetManager
 from internal.telemetry.logger import get_logger
+from internal.telemetry.metrics import MetricsRegistry
 
 SpanHandler = Callable[[TopicPartition, int, TraceSpanRecord], Awaitable[None]]
 RevocationHook = Callable[[Iterable[TopicPartition]], Awaitable[None] | None]
+BackpressureFn = Callable[[], bool]
 
 
 def build_ssl_context(settings: WorkerSettings) -> ssl.SSLContext | None:
@@ -88,6 +90,8 @@ class KafkaSpanConsumer:
         span_handler: SpanHandler,
         consumer: AIOKafkaConsumer | None = None,
         on_revoked_hook: RevocationHook | None = None,
+        backpressure_fn: BackpressureFn | None = None,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         if span_handler is None:
             raise ValueError("span_handler must be provided for durable offset handling")
@@ -96,12 +100,20 @@ class KafkaSpanConsumer:
         self._span_handler = span_handler
         self._consumer = consumer
         self._on_revoked_hook = on_revoked_hook
+        self._backpressure_fn = backpressure_fn
+        self._metrics = metrics
         self._owns_consumer = consumer is None
         self._logger = get_logger("kafka_consumer", stage="ingress")
         self._paused = False
+        self._started = False
         self._last_commit_ts = time.monotonic()
+        self._last_lag_ts = 0.0
         self.consumed_count = 0
         self.quarantined_count = 0
+
+    def is_healthy(self) -> bool:
+        """Return True when the Kafka consumer is started."""
+        return self._started and self._consumer is not None
 
     def _create_consumer(self) -> AIOKafkaConsumer:
         kwargs: dict[str, Any] = {
@@ -123,6 +135,7 @@ class KafkaSpanConsumer:
         if self._consumer is None:
             self._consumer = self._create_consumer()
         await self._consumer.start()
+        self._started = True
         listener = _RebalanceListener(self)
         self._consumer.subscribe([self._settings.kafka_topic], listener=listener)
 
@@ -153,6 +166,7 @@ class KafkaSpanConsumer:
                 error=type(exc).__name__,
             )
         finally:
+            self._started = False
             await self._consumer.stop()
             self._logger.info(
                 "kafka_consumer_stopped",
@@ -207,6 +221,7 @@ class KafkaSpanConsumer:
                 await self._process_message(tp, msg.offset, msg.value)
 
         self._update_backpressure()
+        await self._update_lag_metrics()
         await self.commit_if_due()
         return processed
 
@@ -257,7 +272,27 @@ class KafkaSpanConsumer:
             return
 
         self.consumed_count += 1
+        if self._metrics is not None:
+            self._metrics.inc_spans_consumed(tp.partition)
         await self._span_handler(tp, offset, span)
+
+    async def _update_lag_metrics(self) -> None:
+        if self._metrics is None or self._consumer is None:
+            return
+        now = time.monotonic()
+        if (now - self._last_lag_ts) < self._settings.kafka_offset_commit_interval_seconds:
+            return
+        self._last_lag_ts = now
+        try:
+            assignment = self._consumer.assignment()
+            for tp in assignment:
+                hw = self._consumer.highwater(tp)
+                if hw is None:
+                    continue
+                pos = await self._consumer.position(tp)
+                self._metrics.set_kafka_consumer_lag(tp.partition, max(0, int(hw) - int(pos)))
+        except Exception:  # noqa: S110
+            pass
 
     def _update_backpressure(self) -> None:
         if self._consumer is None:
@@ -265,8 +300,9 @@ class KafkaSpanConsumer:
         in_flight = self._offset_manager.total_in_flight()
         high_water = self._settings.kafka_max_in_flight_offsets
         low_water = max(1, int(high_water * 0.7))
+        external_bp = self._backpressure_fn() if self._backpressure_fn is not None else False
 
-        if not self._paused and in_flight >= high_water:
+        if not self._paused and (in_flight >= high_water or external_bp):
             assignment = self._consumer.assignment()
             if assignment:
                 self._consumer.pause(*assignment)
@@ -275,8 +311,9 @@ class KafkaSpanConsumer:
                     "kafka_consumer_paused_backpressure",
                     in_flight=in_flight,
                     high_water=high_water,
+                    downstream_backpressure=external_bp,
                 )
-        elif self._paused and in_flight <= low_water:
+        elif self._paused and in_flight <= low_water and not external_bp:
             paused = self._consumer.paused()
             if paused:
                 self._consumer.resume(*paused)

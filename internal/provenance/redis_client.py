@@ -21,6 +21,7 @@ from internal.provenance.lru_cache import (
     ProvenanceLRUCache,
 )
 from internal.telemetry.logger import get_logger
+from internal.telemetry.metrics import MetricsRegistry
 
 
 def format_provenance_key(doc_id: int, chunk_id: str) -> str:
@@ -141,11 +142,15 @@ class ProvenanceResolver:
         settings: WorkerSettings,
         lru_cache: ProvenanceLRUCache | None = None,
         redis_client: Any | None = None,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         self._settings = settings
         self._lru = lru_cache or ProvenanceLRUCache(capacity=settings.redis_lru_capacity)
         self._client = redis_client
         self._owns_client = redis_client is None
+        self._metrics = metrics
+        self._total_requested = 0
+        self._total_resolved = 0
         self._logger = get_logger("redis_client", stage="provenance_resolution")
 
     @property
@@ -234,6 +239,15 @@ class ProvenanceResolver:
             if key not in resolved:
                 resolved[key] = DEFAULT_PROVENANCE
                 misses += 1
+
+        self._total_requested += len(unique_keys)
+        self._total_resolved += hits
+        if self._metrics is not None:
+            self._metrics.set_lru_hit_ratio(self._lru.hit_ratio)
+            if self._total_requested > 0:
+                self._metrics.set_provenance_resolution_ratio(
+                    self._total_resolved / self._total_requested
+                )
 
         return ProvenanceResolutionResult(resolved=resolved, hits=hits, misses=misses)
 

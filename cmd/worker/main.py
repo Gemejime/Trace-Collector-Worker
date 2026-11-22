@@ -16,7 +16,9 @@ from multiprocessing.context import SpawnContext, SpawnProcess
 from typing import Any
 
 from internal.config.settings import WorkerSettings
+from internal.telemetry.health import TelemetryHttpServer, TelemetryState, WorkerReadinessReport
 from internal.telemetry.logger import configure_logging, get_logger
+from internal.telemetry.metrics import configure_prometheus_multiproc, mark_worker_process_dead
 
 
 @dataclass(slots=True)
@@ -39,16 +41,28 @@ class WorkerSupervisor:
         settings: WorkerSettings | None = None,
         worker_target: Callable[..., Any] = run_worker_process,
         on_worker_dead: Callable[[int], None] | None = None,
+        telemetry_state: TelemetryState | None = None,
+        enable_http_server: bool = False,
     ) -> None:
         self._settings = settings or WorkerSettings()
         self._worker_target = worker_target
         self._on_worker_dead = on_worker_dead
+        self._telemetry_state = telemetry_state or TelemetryState(
+            expected_workers=self._settings.worker_process_count
+        )
+        self._enable_http_server = enable_http_server
+        self._http_server: TelemetryHttpServer | None = None
         self._ctx: SpawnContext = multiprocessing.get_context("spawn")
         self._stop_event = self._ctx.Event()
         self._heartbeat_queue: Any = self._ctx.Queue(maxsize=1024)
         self._workers: dict[int, _ManagedWorker] = {}
         self._logger = get_logger("supervisor", stage="supervisor")
         self._shutdown_requested = False
+
+    @property
+    def telemetry_state(self) -> TelemetryState:
+        """Return shared supervisor readiness state."""
+        return self._telemetry_state
 
     @property
     def active_worker_pids(self) -> dict[int, int]:
@@ -66,6 +80,7 @@ class WorkerSupervisor:
     def request_shutdown(self) -> None:
         """Signal all workers and the supervisor loop to begin graceful drain."""
         self._shutdown_requested = True
+        self._telemetry_state.set_draining(True)
         self._stop_event.set()
 
     def _spawn_worker(self, worker_index: int) -> _ManagedWorker:
@@ -106,8 +121,22 @@ class WorkerSupervisor:
                 slot.last_heartbeat_ts = time.monotonic()
                 slot.last_heartbeat_pid = hb.pid
                 slot.consecutive_failures = 0
+                self._telemetry_state.update_worker(
+                    WorkerReadinessReport(
+                        worker_index=hb.worker_index,
+                        pid=hb.pid,
+                        kafka=hb.kafka,
+                        redis=hb.redis,
+                        clickhouse=hb.clickhouse,
+                        disk_wal=hb.disk_wal,
+                        draining=hb.draining,
+                    )
+                )
 
     def _notify_dead_pid(self, pid: int | None) -> None:
+        if pid is not None:
+            self._telemetry_state.clear_pid(pid)
+            mark_worker_process_dead(pid, multiproc_dir=self._settings.prometheus_multiproc_dir)
         if pid is not None and self._on_worker_dead is not None:
             try:
                 self._on_worker_dead(pid)
@@ -238,6 +267,15 @@ class WorkerSupervisor:
                 signal.signal(sig, _signal_handler)
 
         exit_code = 0
+        if self._enable_http_server:
+            self._http_server = TelemetryHttpServer(
+                host=self._settings.telemetry_host,
+                port=self._settings.telemetry_port,
+                state=self._telemetry_state,
+                active_workers_fn=lambda: len(self.active_worker_pids),
+                multiproc_dir=self._settings.prometheus_multiproc_dir,
+            )
+            self._http_server.start()
         try:
             self.start()
             while not self._shutdown_requested:
@@ -247,14 +285,18 @@ class WorkerSupervisor:
                 time.sleep(poll_interval_seconds)
         finally:
             self.shutdown()
+            if self._http_server is not None:
+                self._http_server.stop()
+                self._http_server = None
         return exit_code
 
 
 def main() -> None:
     """CLI entrypoint for rag-trace-worker."""
     settings = WorkerSettings()
+    configure_prometheus_multiproc(settings.prometheus_multiproc_dir)
     configure_logging(settings.log_level)
-    supervisor = WorkerSupervisor(settings=settings)
+    supervisor = WorkerSupervisor(settings=settings, enable_http_server=True)
     sys.exit(supervisor.run())
 
 

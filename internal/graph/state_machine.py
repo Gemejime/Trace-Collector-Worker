@@ -14,6 +14,7 @@ from api.proto.v1.trace_record_pb2 import TraceSpanRecord
 from internal.graph.rank_tracker import RANK_ABSENT, compute_rank_deltas
 from internal.graph.timewheel import BucketedTimeWheel
 from internal.provenance.lru_cache import DEFAULT_PROVENANCE, ChunkProvenance, ProvenanceKey
+from internal.telemetry.metrics import MetricsRegistry
 
 TraceKey = tuple[str, str]
 
@@ -212,6 +213,7 @@ class DagStateMachine:
         timewheel: BucketedTimeWheel,
         max_open_traces: int = 25_000,
         completed_cache_size: int = 50_000,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         if max_open_traces < 1:
             raise ValueError("max_open_traces must be >= 1")
@@ -221,6 +223,7 @@ class DagStateMachine:
         self._timewheel = timewheel
         self._max_open_traces = max_open_traces
         self._completed_cache_size = completed_cache_size
+        self._metrics = metrics
         self._open_traces: OrderedDict[TraceKey, _OpenTrace] = OrderedDict()
         self._completed_traces: OrderedDict[TraceKey, None] = OrderedDict()
 
@@ -254,6 +257,9 @@ class DagStateMachine:
             self.dag_evictions_partial_count += 1
         else:
             self.dag_evictions_complete_count += 1
+        if self._metrics is not None:
+            self._metrics.inc_dags_assembled(1)
+            self._metrics.inc_dag_evictions("partial" if is_partial else "complete", 1)
 
         return PendingDag(
             trace_id=trace.trace_id,

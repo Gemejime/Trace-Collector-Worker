@@ -10,7 +10,7 @@ import signal
 import sys
 import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -24,7 +24,12 @@ from internal.consumer.offset_manager import OffsetManager
 from internal.graph.state_machine import DagStateMachine, PendingDag, build_provenance_graph
 from internal.graph.timewheel import BucketedTimeWheel
 from internal.provenance.redis_client import ProvenanceResolver
+from internal.storage.clickhouse.batch_buffer import MicroBatchBuffer
+from internal.storage.clickhouse.native_client import ClickHouseNativeClient
+from internal.storage.spillover.disk_wal import DiskWal
+from internal.telemetry.jemalloc_stats import JemallocStatsScraper
 from internal.telemetry.logger import configure_logging, get_logger
+from internal.telemetry.metrics import MetricsRegistry, configure_prometheus_multiproc
 
 
 @dataclass(slots=True, frozen=True)
@@ -35,6 +40,11 @@ class WorkerHeartbeat:
     pid: int
     timestamp: float
     status: str = "alive"
+    kafka: str = "ok"
+    redis: str = "ok"
+    clickhouse: str = "ok"
+    disk_wal: str = "ok"
+    draining: bool = False
 
 
 class DagEmitSink(Protocol):
@@ -87,6 +97,17 @@ class TracePipeline:
         self._retry_dags: deque[tuple[PendingDag, dict[TopicPartition, int | None]]] = deque()
         self._logger = get_logger("trace_pipeline", stage="dag_assembly")
 
+    def set_emit_sink(self, emit_sink: DagEmitSink) -> None:
+        """Attach or replace the downstream DAG emit sink."""
+        self._emit_sink = emit_sink
+
+    def mark_traces_durable(self, trace_keys: Sequence[tuple[str, str]]) -> None:
+        """Mark late duplicate span offsets durable once ClickHouse ACKs the batch."""
+        for trace_key in trace_keys:
+            waiting_offsets = self._pending_emissions.pop(trace_key, [])
+            for late_tp, late_offset, late_gen in waiting_offsets:
+                self._offset_manager.mark_durable(late_tp, late_offset, generation=late_gen)
+
     def _is_assignment_current(self, generations: dict[TopicPartition, int | None]) -> bool:
         for tp, expected_gen in generations.items():
             if (
@@ -136,9 +157,8 @@ class TracePipeline:
                 self._state_machine.clear_completed(pending.tenant_id, pending.trace_id)
             return
 
-        waiting_offsets = self._pending_emissions.pop(trace_key, [])
-        for late_tp, late_offset, late_gen in waiting_offsets:
-            self._offset_manager.mark_durable(late_tp, late_offset, generation=late_gen)
+        if not getattr(self._emit_sink, "defers_durability", False):
+            self.mark_traces_durable([trace_key])
 
     def _schedule_task(
         self,
@@ -258,6 +278,11 @@ def _emit_heartbeat(
     heartbeat_queue: Any,
     worker_index: int,
     status: str = "alive",
+    kafka: str = "ok",
+    redis: str = "ok",
+    clickhouse: str = "ok",
+    disk_wal: str = "ok",
+    draining: bool = False,
 ) -> None:
     if heartbeat_queue is None:
         return
@@ -266,6 +291,11 @@ def _emit_heartbeat(
         pid=os.getpid(),
         timestamp=time.monotonic(),
         status=status,
+        kafka=kafka,
+        redis=redis,
+        clickhouse=clickhouse,
+        disk_wal=disk_wal,
+        draining=draining,
     )
     with contextlib.suppress(queue.Full):
         heartbeat_queue.put_nowait(hb)
@@ -277,11 +307,34 @@ async def _heartbeat_loop(
     interval_seconds: float,
     local_stop: asyncio.Event,
     external_stop_event: Any,
+    consumer: KafkaSpanConsumer,
+    provenance_resolver: ProvenanceResolver,
+    ch_client: ClickHouseNativeClient,
+    disk_wal: DiskWal,
+    jemalloc_scraper: JemallocStatsScraper,
+    metrics: MetricsRegistry,
 ) -> None:
     while not local_stop.is_set() and not (
         external_stop_event is not None and external_stop_event.is_set()
     ):
-        _emit_heartbeat(heartbeat_queue, worker_index, status="alive")
+        redis_ok, ch_ok = await asyncio.gather(
+            provenance_resolver.ping(),
+            ch_client.ping(),
+        )
+        wal_ok = disk_wal.is_healthy()
+        kafka_ok = consumer.is_healthy()
+        j_stats = jemalloc_scraper.scrape()
+        metrics.set_jemalloc_resident_bytes(j_stats.resident_bytes)
+        _emit_heartbeat(
+            heartbeat_queue,
+            worker_index,
+            status="running" if kafka_ok else "alive",
+            kafka="ok" if kafka_ok else "error",
+            redis="ok" if redis_ok else "error",
+            clickhouse="ok" if ch_ok else "error",
+            disk_wal="ok" if wal_ok else "error",
+            draining=False,
+        )
         await asyncio.sleep(interval_seconds)
 
 
@@ -297,6 +350,26 @@ async def _timewheel_tick_loop(
     ):
         await asyncio.sleep(interval)
         await pipeline.tick_and_flush()
+
+
+async def _batch_flush_and_wal_loop(
+    batch_buffer: MicroBatchBuffer,
+    flush_interval_seconds: float,
+    wal_drain_interval_seconds: float,
+    local_stop: asyncio.Event,
+    external_stop_event: Any,
+) -> None:
+    sleep_interval = min(0.25, max(0.05, flush_interval_seconds / 4.0))
+    last_wal_drain = time.monotonic()
+    while not local_stop.is_set() and not (
+        external_stop_event is not None and external_stop_event.is_set()
+    ):
+        await asyncio.sleep(sleep_interval)
+        await batch_buffer.flush_if_due()
+        now = time.monotonic()
+        if (now - last_wal_drain) >= wal_drain_interval_seconds:
+            last_wal_drain = now
+            await batch_buffer.drain_wal()
 
 
 async def _run_worker_async(
@@ -316,6 +389,11 @@ async def _run_worker_async(
         with contextlib.suppress(NotImplementedError, ValueError):
             loop.add_signal_handler(sig, _request_stop)
 
+    metrics = MetricsRegistry(
+        worker_id=f"worker-{worker_index}",
+        multiproc_dir=settings.prometheus_multiproc_dir,
+    )
+    jemalloc_scraper = JemallocStatsScraper()
     offset_manager = OffsetManager()
     start_ms = int(time.monotonic() * 1000)
     timewheel = BucketedTimeWheel(
@@ -326,18 +404,43 @@ async def _run_worker_async(
     state_machine = DagStateMachine(
         timewheel=timewheel,
         max_open_traces=settings.timewheel_max_open_traces,
+        metrics=metrics,
     )
-    provenance_resolver = ProvenanceResolver(settings=settings)
+    provenance_resolver = ProvenanceResolver(settings=settings, metrics=metrics)
+    per_worker_wal_bytes = max(1, settings.disk_wal_max_bytes // settings.worker_process_count)
+    disk_wal = DiskWal(
+        wal_dir=settings.disk_wal_dir,
+        worker_index=worker_index,
+        max_bytes=per_worker_wal_bytes,
+        metrics=metrics,
+    )
+    ch_client = ClickHouseNativeClient(settings=settings, metrics=metrics)
     pipeline = TracePipeline(
         state_machine=state_machine,
         provenance_resolver=provenance_resolver,
         offset_manager=offset_manager,
     )
+    batch_buffer = MicroBatchBuffer(
+        settings=settings,
+        client=ch_client,
+        offset_manager=offset_manager,
+        disk_wal=disk_wal,
+        on_traces_durable=pipeline.mark_traces_durable,
+    )
+    pipeline.set_emit_sink(batch_buffer)
+
+    def _on_partitions_revoked(revoked: Iterable[TopicPartition]) -> None:
+        revoked_list = list(revoked)
+        pipeline.on_partitions_revoked(revoked_list)
+        batch_buffer.on_partitions_revoked(revoked_list)
+
     consumer = KafkaSpanConsumer(
         settings=settings,
         offset_manager=offset_manager,
         span_handler=pipeline.handle_span,
-        on_revoked_hook=pipeline.on_partitions_revoked,
+        on_revoked_hook=_on_partitions_revoked,
+        backpressure_fn=batch_buffer.is_backpressure_active,
+        metrics=metrics,
     )
 
     hb_task = asyncio.create_task(
@@ -347,12 +450,27 @@ async def _run_worker_async(
             interval_seconds=settings.worker_heartbeat_interval_seconds,
             local_stop=local_stop,
             external_stop_event=stop_event,
+            consumer=consumer,
+            provenance_resolver=provenance_resolver,
+            ch_client=ch_client,
+            disk_wal=disk_wal,
+            jemalloc_scraper=jemalloc_scraper,
+            metrics=metrics,
         )
     )
     tick_task = asyncio.create_task(
         _timewheel_tick_loop(
             pipeline=pipeline,
             tick_ms=settings.timewheel_tick_ms,
+            local_stop=local_stop,
+            external_stop_event=stop_event,
+        )
+    )
+    flush_task = asyncio.create_task(
+        _batch_flush_and_wal_loop(
+            batch_buffer=batch_buffer,
+            flush_interval_seconds=settings.batch_flush_interval_seconds,
+            wal_drain_interval_seconds=settings.disk_wal_drain_interval_seconds,
             local_stop=local_stop,
             external_stop_event=stop_event,
         )
@@ -366,13 +484,22 @@ async def _run_worker_async(
         )
     finally:
         local_stop.set()
-        _emit_heartbeat(heartbeat_queue, worker_index, status="draining")
+        _emit_heartbeat(heartbeat_queue, worker_index, status="draining", draining=True)
         tick_task.cancel()
-        await asyncio.gather(tick_task, return_exceptions=True)
+        flush_task.cancel()
+        await asyncio.gather(tick_task, flush_task, return_exceptions=True)
 
         try:
             await asyncio.wait_for(
                 pipeline.flush_pending_emissions(),
+                timeout=settings.graceful_drain_timeout_seconds,
+            )
+            await asyncio.wait_for(
+                batch_buffer.flush(),
+                timeout=settings.graceful_drain_timeout_seconds,
+            )
+            await asyncio.wait_for(
+                batch_buffer.drain_wal(),
                 timeout=settings.graceful_drain_timeout_seconds,
             )
         except TimeoutError:
@@ -387,6 +514,7 @@ async def _run_worker_async(
             logger.warning("worker_graceful_drain_timed_out")
 
         await provenance_resolver.close()
+        await ch_client.close()
         hb_task.cancel()
         await asyncio.gather(hb_task, return_exceptions=True)
 
@@ -399,6 +527,7 @@ def run_worker_process(
     """Subprocess entrypoint initializing event loop, settings, logging, and Kafka consumer."""
     loop_impl = install_event_loop()
     settings = WorkerSettings()
+    configure_prometheus_multiproc(settings.prometheus_multiproc_dir)
     configure_logging(settings.log_level)
     logger = get_logger("process_runner", stage="startup", worker_index=worker_index)
     logger.info("worker_process_starting", event_loop=loop_impl)
