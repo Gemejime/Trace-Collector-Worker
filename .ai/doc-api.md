@@ -150,6 +150,7 @@ Assembled execution DAG and coordinate-enriched record schema for ClickHouse per
 | `trace_worker_provenance_resolution_ratio` | Gauge | `worker_id` | Ratio of chunk hashes successfully mapped to lineage metadata |
 | `trace_worker_lru_hit_ratio` | Gauge | `worker_id` | Local 50k LRU cache hit vs. miss ratio |
 | `trace_worker_clickhouse_flush_duration_seconds` | Histogram | `worker_id` | Micro-batch native TCP insert latencies into ClickHouse |
+| `trace_worker_jemalloc_allocated_bytes` | Gauge | `worker_id` | Allocated native heap tracked by `jemalloc` (`mallctl`) |
 | `trace_worker_jemalloc_resident_bytes` | Gauge | `worker_id` | Resident native heap allocated by `jemalloc` (`mallctl`) |
 | `trace_worker_kafka_consumer_lag` | Gauge | `partition` | Kafka consumer group lag per partition (KEDA scaling signal) |
 | `trace_worker_spillover_active` | Gauge | `worker_id` | `1` when spooling micro-batches to local disk WAL |

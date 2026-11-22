@@ -1,0 +1,35 @@
+{{- if .Values.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "rag-trace-collector-worker.fullname" . }}
+  labels:
+    {{- include "rag-trace-collector-worker.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    {{- if .Values.rollout.enabled }}
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    {{- else }}
+    apiVersion: apps/v1
+    kind: Deployment
+    {{- end }}
+    name: {{ include "rag-trace-collector-worker.fullname" . }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: {{ .Values.kafka.bootstrapServers | quote }}
+        consumerGroup: {{ .Values.kafka.groupId | quote }}
+        topic: {{ .Values.kafka.topic | quote }}
+        lagThreshold: {{ .Values.keda.lagThreshold | quote }}
+        activationLagThreshold: {{ .Values.keda.activationLagThreshold | quote }}
+        offsetResetPolicy: {{ .Values.kafka.autoOffsetReset | quote }}
+      {{- if .Values.keda.triggerAuthentication.enabled }}
+      authenticationRef:
+        name: {{ .Values.keda.triggerAuthentication.name | quote }}
+      {{- end }}
+{{- end }}

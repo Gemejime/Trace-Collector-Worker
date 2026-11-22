@@ -1,0 +1,178 @@
+replicaCount: 4
+
+image:
+  repository: ghcr.io/rag-platform/rag-trace-collector-worker
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  capabilities:
+    drop:
+      - ALL
+
+# Compute-optimized node sizing (c6i.xlarge / c7g.xlarge)
+resources:
+  requests:
+    cpu: 2000m
+    memory: 1.5Gi
+  limits:
+    cpu: 4000m
+    memory: 2.5Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 8080
+
+worker:
+  processCount: 4
+  gracefulDrainTimeoutSeconds: 20.0
+  logLevel: "INFO"
+  telemetryHost: "0.0.0.0"
+  telemetryPort: 8080
+  prometheusMultiprocDir: "/tmp/prom-multiproc"
+  timewheelExpirySeconds: 1.5
+  timewheelTickMs: 50
+  timewheelMaxOpenTraces: 25000
+  batchMaxRows: 50000
+  batchFlushIntervalSeconds: 2.0
+  batchMaxPendingBatches: 4
+  diskWalDir: "/var/spool/trace-wal"
+  diskWalMaxBytes: 536870912
+  diskWalDrainIntervalSeconds: 2.0
+
+kafka:
+  bootstrapServers: "kafka-cluster-kafka-bootstrap.kafka.svc.cluster.local:9093"
+  topic: "rag-diagnostic-traces"
+  topicPartitions: 32
+  groupId: "rag-trace-collector-worker"
+  autoOffsetReset: "earliest"
+  securityProtocol: "SASL_SSL"
+  saslMechanism: "SCRAM-SHA-512"
+  maxPollIntervalMs: 300000
+  sessionTimeoutMs: 30000
+  heartbeatIntervalMs: 3000
+  maxPollRecords: 500
+  ports:
+    - 9092
+    - 9093
+    - 9094
+  secretName: ""
+
+redis:
+  clusterNodes: "redis-cluster.redis.svc.cluster.local:6379"
+  tlsEnabled: true
+  lruCapacity: 50000
+  socketTimeoutSeconds: 0.5
+  pipelineBatchSize: 256
+  ports:
+    - 6379
+    - 6380
+  secretName: ""
+
+clickhouse:
+  host: "clickhouse.clickhouse.svc.cluster.local"
+  port: 9440
+  database: "rag_traces"
+  user: "trace_worker"
+  tlsEnabled: true
+  insertDeduplicate: true
+  asyncInsert: false
+  replicated: true
+  clusterName: "rag_cluster"
+  ports:
+    - 9000
+    - 9440
+  secretName: ""
+
+walVolume:
+  sizeLimit: 1Gi
+
+terminationGracePeriodSeconds: 30
+
+probes:
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+keda:
+  enabled: true
+  minReplicaCount: 4
+  maxReplicaCount: 16
+  pollingInterval: 15
+  cooldownPeriod: 300
+  lagThreshold: "5000"
+  activationLagThreshold: "100"
+  triggerAuthentication:
+    enabled: false
+    name: ""
+
+pdb:
+  enabled: true
+  minAvailable: 3
+
+networkPolicy:
+  enabled: true
+  prometheusNamespaceSelector:
+    kubernetes.io/metadata.name: monitoring
+
+prometheusRule:
+  enabled: true
+  labels: {}
+
+rollout:
+  enabled: false
+  prometheusAddress: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
+  canary:
+    steps:
+      - setWeight: 10
+      - pause:
+          duration: 2m
+      - analysis:
+          templates:
+            - templateName: rag-trace-collector-worker-canary
+      - setWeight: 50
+      - pause:
+          duration: 5m
+      - analysis:
+          templates:
+            - templateName: rag-trace-collector-worker-canary

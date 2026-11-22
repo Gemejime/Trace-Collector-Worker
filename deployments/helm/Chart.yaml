@@ -1,0 +1,14 @@
+apiVersion: v2
+name: rag-trace-collector-worker
+description: Asynchronous multi-process Kafka-to-ClickHouse RAG trace DAG assembly worker
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - rag
+  - trace-collector
+  - kafka
+  - clickhouse
+  - keda
+maintainers:
+  - name: RAG Platform Engineering

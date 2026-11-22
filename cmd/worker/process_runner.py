@@ -324,6 +324,7 @@ async def _heartbeat_loop(
         wal_ok = disk_wal.is_healthy()
         kafka_ok = consumer.is_healthy()
         j_stats = jemalloc_scraper.scrape()
+        metrics.set_jemalloc_allocated_bytes(j_stats.allocated_bytes)
         metrics.set_jemalloc_resident_bytes(j_stats.resident_bytes)
         _emit_heartbeat(
             heartbeat_queue,

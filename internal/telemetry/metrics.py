@@ -115,6 +115,13 @@ class MetricsRegistry:
             buckets=_FLUSH_LATENCY_BUCKETS,
             registry=registry,
         )
+        self.jemalloc_allocated_bytes = Gauge(
+            "trace_worker_jemalloc_allocated_bytes",
+            "Allocated native heap tracked by jemalloc (mallctl)",
+            labelnames=("worker_id",),
+            multiprocess_mode="liveall",
+            registry=registry,
+        )
         self.jemalloc_resident_bytes = Gauge(
             "trace_worker_jemalloc_resident_bytes",
             "Resident native heap allocated by jemalloc (mallctl)",
@@ -180,6 +187,9 @@ class MetricsRegistry:
 
     def set_spillover_active(self, active: bool) -> None:
         self.spillover_active.labels(worker_id=self.worker_id).set(1.0 if active else 0.0)
+
+    def set_jemalloc_allocated_bytes(self, allocated_bytes: int) -> None:
+        self.jemalloc_allocated_bytes.labels(worker_id=self.worker_id).set(max(0, allocated_bytes))
 
     def set_jemalloc_resident_bytes(self, resident_bytes: int) -> None:
         self.jemalloc_resident_bytes.labels(worker_id=self.worker_id).set(max(0, resident_bytes))
