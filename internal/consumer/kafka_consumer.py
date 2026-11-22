@@ -26,7 +26,7 @@ SpanHandler = Callable[[TopicPartition, int, TraceSpanRecord], Awaitable[None]]
 RevocationHook = Callable[[Iterable[TopicPartition]], Awaitable[None] | None]
 
 
-def _build_ssl_context(settings: WorkerSettings) -> ssl.SSLContext | None:
+def build_ssl_context(settings: WorkerSettings) -> ssl.SSLContext | None:
     """Build an SSLContext when Kafka security protocol requires TLS."""
     if settings.kafka_security_protocol not in ("SSL", "SASL_SSL"):
         return None
@@ -43,6 +43,26 @@ def _build_ssl_context(settings: WorkerSettings) -> ssl.SSLContext | None:
             password=key_password,
         )
     return ctx
+
+
+def build_kafka_client_kwargs(settings: WorkerSettings) -> dict[str, Any]:
+    """Build shared Kafka connection and security kwargs for consumer and admin clients."""
+    ssl_context = build_ssl_context(settings)
+    kwargs: dict[str, Any] = {
+        "bootstrap_servers": settings.kafka_bootstrap_servers,
+        "security_protocol": settings.kafka_security_protocol,
+    }
+    if ssl_context is not None:
+        kwargs["ssl_context"] = ssl_context
+    if settings.kafka_security_protocol in ("SASL_PLAINTEXT", "SASL_SSL"):
+        kwargs["sasl_mechanism"] = settings.kafka_sasl_mechanism
+        kwargs["sasl_plain_username"] = settings.kafka_sasl_username
+        kwargs["sasl_plain_password"] = (
+            settings.kafka_sasl_password.get_secret_value()
+            if settings.kafka_sasl_password is not None
+            else None
+        )
+    return kwargs
 
 
 class _RebalanceListener(ConsumerRebalanceListener):  # type: ignore[misc]
@@ -65,10 +85,12 @@ class KafkaSpanConsumer:
         self,
         settings: WorkerSettings,
         offset_manager: OffsetManager,
-        span_handler: SpanHandler | None = None,
+        span_handler: SpanHandler,
         consumer: AIOKafkaConsumer | None = None,
         on_revoked_hook: RevocationHook | None = None,
     ) -> None:
+        if span_handler is None:
+            raise ValueError("span_handler must be provided for durable offset handling")
         self._settings = settings
         self._offset_manager = offset_manager
         self._span_handler = span_handler
@@ -82,9 +104,8 @@ class KafkaSpanConsumer:
         self.quarantined_count = 0
 
     def _create_consumer(self) -> AIOKafkaConsumer:
-        ssl_context = _build_ssl_context(self._settings)
         kwargs: dict[str, Any] = {
-            "bootstrap_servers": self._settings.kafka_bootstrap_servers,
+            **build_kafka_client_kwargs(self._settings),
             "group_id": self._settings.kafka_group_id,
             "auto_offset_reset": self._settings.kafka_auto_offset_reset,
             "enable_auto_commit": False,
@@ -94,18 +115,7 @@ class KafkaSpanConsumer:
             "max_poll_interval_ms": self._settings.kafka_max_poll_interval_ms,
             "session_timeout_ms": self._settings.kafka_session_timeout_ms,
             "heartbeat_interval_ms": self._settings.kafka_heartbeat_interval_ms,
-            "security_protocol": self._settings.kafka_security_protocol,
         }
-        if ssl_context is not None:
-            kwargs["ssl_context"] = ssl_context
-        if self._settings.kafka_security_protocol in ("SASL_PLAINTEXT", "SASL_SSL"):
-            kwargs["sasl_mechanism"] = self._settings.kafka_sasl_mechanism
-            kwargs["sasl_plain_username"] = self._settings.kafka_sasl_username
-            kwargs["sasl_plain_password"] = (
-                self._settings.kafka_sasl_password.get_secret_value()
-                if self._settings.kafka_sasl_password is not None
-                else None
-            )
         return AIOKafkaConsumer(**kwargs)
 
     async def start(self) -> None:
@@ -240,9 +250,6 @@ class KafkaSpanConsumer:
             self.quarantined_count += 1
             self._logger.warning(
                 "kafka_payload_quarantined",
-                trace_id=span.trace_id,
-                span_id=span.span_id,
-                tenant_id=span.tenant_id,
                 partition=tp.partition,
                 offset=offset,
                 reason="missing_required_span_fields",
@@ -250,10 +257,7 @@ class KafkaSpanConsumer:
             return
 
         self.consumed_count += 1
-        if self._span_handler is not None:
-            await self._span_handler(tp, offset, span)
-        else:
-            self._offset_manager.mark_durable(tp, offset)
+        await self._span_handler(tp, offset, span)
 
     def _update_backpressure(self) -> None:
         if self._consumer is None:

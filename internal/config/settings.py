@@ -15,6 +15,7 @@ class WorkerSettings(BaseSettings):
         env_prefix="",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # Multi-process supervisor & lifecycle

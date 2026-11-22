@@ -26,6 +26,7 @@ class _ManagedWorker:
     worker_index: int
     process: SpawnProcess | None = None
     last_heartbeat_ts: float = field(default_factory=time.monotonic)
+    last_heartbeat_pid: int | None = None
     restart_timestamps: deque[float] = field(default_factory=deque)
     consecutive_failures: int = 0
 
@@ -81,6 +82,7 @@ class WorkerSupervisor:
             self._workers[worker_index] = slot
         slot.process = proc
         slot.last_heartbeat_ts = time.monotonic()
+        slot.last_heartbeat_pid = None
         self._logger.info(
             "worker_spawned",
             worker_index=worker_index,
@@ -102,6 +104,7 @@ class WorkerSupervisor:
             slot = self._workers.get(hb.worker_index)
             if slot is not None:
                 slot.last_heartbeat_ts = time.monotonic()
+                slot.last_heartbeat_pid = hb.pid
                 slot.consecutive_failures = 0
 
     def _notify_dead_pid(self, pid: int | None) -> None:
@@ -234,9 +237,9 @@ class WorkerSupervisor:
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, _signal_handler)
 
-        self.start()
         exit_code = 0
         try:
+            self.start()
             while not self._shutdown_requested:
                 if not self.monitor_once():
                     exit_code = 1

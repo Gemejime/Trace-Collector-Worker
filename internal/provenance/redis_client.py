@@ -32,7 +32,10 @@ def _parse_optional_positive_float(raw: object) -> float | None:
     if isinstance(raw, bool) or raw is None:
         return None
     if isinstance(raw, (int, float)):
-        val = float(raw)
+        try:
+            val = float(raw)
+        except OverflowError:
+            return None
         return val if val > 0.0 else None
     try:
         val = float(str(raw))

@@ -47,9 +47,20 @@ _DSN_CREDENTIAL_RE = re.compile(
     r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s:@]*):([^/\s@]+)@",
 )
 _KV_SECRET_RE = re.compile(
-    r"(?i)\b(password|passwd|passphrase|secret|api_key|token|authorization)\s*([=:])\s*([^\s,;'\"]+|'[^']*'|\"[^\"]*\")"
+    r"""(?i)(?:"|')?\b(password|passwd|passphrase|secret|api_key|token|authorization)\b(?:"|')?\s*([=:])\s*(?:Basic\s+[A-Za-z0-9._\-+/=\[\]]+|Bearer\s+[A-Za-z0-9._\-+/=\[\]]+|'[^']*'|"[^"]*"|[^\s,;'"\}\]]+)"""
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-+/=]+")
+_BASIC_RE = re.compile(r"(?i)\bBasic\s+[A-Za-z0-9._\-+/=]+")
+
+_COMPOUND_SENSITIVE_TOKENS: tuple[str, ...] = (
+    "api_key",
+    "connection_string",
+    "chunk_text",
+    "raw_text",
+    "query_text",
+    "sasl_password",
+    "ssl_key_password",
+)
 
 _DEFAULT_CORRELATION_FIELDS: dict[str, Any] = {
     "trace_id": "",
@@ -65,17 +76,25 @@ def _is_sensitive_key(key: str) -> bool:
     normalized = key.strip().lower()
     if normalized in _SENSITIVE_KEY_TOKENS:
         return True
+    parts = [part for part in re.split(r"[^a-z0-9]+", normalized) if part]
+    if any(part in _SENSITIVE_KEY_TOKENS for part in parts):
+        return True
+    if any(tok in normalized for tok in _COMPOUND_SENSITIVE_TOKENS):
+        return True
     return any(tok in normalized for tok in ("password", "secret", "token", "passphrase", "dsn"))
 
 
 def _sanitize_string(value: str) -> str:
     sanitized = _DSN_CREDENTIAL_RE.sub(rf"\1{REDACTED}:{REDACTED}@", value)
     sanitized = _BEARER_RE.sub(f"Bearer {REDACTED}", sanitized)
+    sanitized = _BASIC_RE.sub(f"Basic {REDACTED}", sanitized)
     sanitized = _KV_SECRET_RE.sub(rf"\1\2{REDACTED}", sanitized)
     return sanitized
 
 
 def _sanitize_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
     if isinstance(value, SecretStr):
         return REDACTED
     if isinstance(value, str):
@@ -89,7 +108,7 @@ def _sanitize_value(value: Any) -> Any:
         return [_sanitize_value(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_sanitize_value(item) for item in value)
-    return value
+    return f"<{type(value).__name__}>"
 
 
 def inject_correlation_defaults(
@@ -132,9 +151,9 @@ def configure_logging(
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True, key="timestamp"),
             inject_correlation_defaults,
-            redact_sensitive_fields,
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
+            redact_sensitive_fields,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),

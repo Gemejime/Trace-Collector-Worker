@@ -15,6 +15,8 @@ from internal.graph.rank_tracker import RANK_ABSENT, compute_rank_deltas
 from internal.graph.timewheel import BucketedTimeWheel
 from internal.provenance.lru_cache import DEFAULT_PROVENANCE, ChunkProvenance, ProvenanceKey
 
+TraceKey = tuple[str, str]
+
 
 @dataclass(slots=True)
 class MergedCandidate:
@@ -113,9 +115,9 @@ class _OpenTrace:
                 )
 
     def is_complete(self) -> bool:
-        if self.has_terminal:
-            return True
-        return self.expected_span_count > 0 and len(self.span_ids) >= self.expected_span_count
+        if self.expected_span_count > 0:
+            return len(self.span_ids) >= self.expected_span_count
+        return self.has_terminal
 
 
 @dataclass(slots=True, frozen=True)
@@ -219,8 +221,8 @@ class DagStateMachine:
         self._timewheel = timewheel
         self._max_open_traces = max_open_traces
         self._completed_cache_size = completed_cache_size
-        self._open_traces: OrderedDict[str, _OpenTrace] = OrderedDict()
-        self._completed_traces: OrderedDict[str, None] = OrderedDict()
+        self._open_traces: OrderedDict[TraceKey, _OpenTrace] = OrderedDict()
+        self._completed_traces: OrderedDict[TraceKey, None] = OrderedDict()
 
         self.dags_assembled_count = 0
         self.dag_evictions_partial_count = 0
@@ -230,17 +232,22 @@ class DagStateMachine:
     def open_trace_count(self) -> int:
         return len(self._open_traces)
 
-    def _record_completed(self, trace_id: str) -> None:
-        if trace_id in self._completed_traces:
-            self._completed_traces.move_to_end(trace_id)
+    def _record_completed(self, trace_key: TraceKey) -> None:
+        if trace_key in self._completed_traces:
+            self._completed_traces.move_to_end(trace_key)
             return
-        self._completed_traces[trace_id] = None
+        self._completed_traces[trace_key] = None
         if len(self._completed_traces) > self._completed_cache_size:
             self._completed_traces.popitem(last=False)
 
+    def clear_completed(self, tenant_id: str, trace_id: str) -> None:
+        """Clear a trace from the completed cache so replayed spans can rebuild it."""
+        self._completed_traces.pop((tenant_id, trace_id), None)
+
     def _finalize_trace(self, trace: _OpenTrace, is_partial: bool) -> PendingDag:
-        self._timewheel.cancel(trace.trace_id)
-        self._record_completed(trace.trace_id)
+        trace_key: TraceKey = (trace.tenant_id, trace.trace_id)
+        self._timewheel.cancel(trace_key)
+        self._record_completed(trace_key)
         duration_ms, event_date = _compute_duration_and_date(trace.min_start_ns, trace.max_end_ns)
         self.dags_assembled_count += 1
         if is_partial:
@@ -266,43 +273,44 @@ class DagStateMachine:
         span: TraceSpanRecord,
     ) -> SpanIngestResult:
         """Ingest one validated ``TraceSpanRecord`` synchronously without blocking."""
-        if span.trace_id in self._completed_traces:
+        trace_key: TraceKey = (span.tenant_id, span.trace_id)
+        if trace_key in self._completed_traces:
             return SpanIngestResult(immediate_durable_offsets=((tp, offset),))
 
         ready: list[PendingDag] = []
-        trace = self._open_traces.get(span.trace_id)
+        trace = self._open_traces.get(trace_key)
         if trace is None:
             while len(self._open_traces) >= self._max_open_traces:
                 _, oldest = self._open_traces.popitem(last=False)
                 ready.append(self._finalize_trace(oldest, is_partial=True))
 
             trace = _OpenTrace(trace_id=span.trace_id, tenant_id=span.tenant_id)
-            self._open_traces[span.trace_id] = trace
-            self._timewheel.schedule(span.trace_id)
+            self._open_traces[trace_key] = trace
+            self._timewheel.schedule(trace_key)
 
         trace.add_span(tp, offset, span)
         if trace.is_complete():
-            self._open_traces.pop(span.trace_id, None)
+            self._open_traces.pop(trace_key, None)
             ready.append(self._finalize_trace(trace, is_partial=False))
 
         return SpanIngestResult(ready_dags=tuple(ready))
 
     def advance_time(self, now_ms: int) -> list[PendingDag]:
         """Advance the time-wheel to ``now_ms`` and emit expired partial DAGs."""
-        expired_ids = self._timewheel.advance_to(now_ms)
+        expired_keys = self._timewheel.advance_to(now_ms)
         emitted: list[PendingDag] = []
-        for trace_id in expired_ids:
-            trace = self._open_traces.pop(trace_id, None)
+        for trace_key in expired_keys:
+            trace = self._open_traces.pop(trace_key, None)
             if trace is not None:
                 emitted.append(self._finalize_trace(trace, is_partial=True))
         return emitted
 
     def tick(self) -> list[PendingDag]:
         """Advance the time-wheel by one tick and emit expired partial DAGs."""
-        expired_ids = self._timewheel.tick()
+        expired_keys = self._timewheel.tick()
         emitted: list[PendingDag] = []
-        for trace_id in expired_ids:
-            trace = self._open_traces.pop(trace_id, None)
+        for trace_key in expired_keys:
+            trace = self._open_traces.pop(trace_key, None)
             if trace is not None:
                 emitted.append(self._finalize_trace(trace, is_partial=True))
         return emitted
@@ -314,11 +322,11 @@ class DagStateMachine:
             return 0
 
         to_drop = [
-            trace_id
-            for trace_id, trace in self._open_traces.items()
+            trace_key
+            for trace_key, trace in self._open_traces.items()
             if trace.partitions & revoked_set
         ]
-        for trace_id in to_drop:
-            self._open_traces.pop(trace_id, None)
-            self._timewheel.cancel(trace_id)
+        for trace_key in to_drop:
+            self._open_traces.pop(trace_key, None)
+            self._timewheel.cancel(trace_key)
         return len(to_drop)

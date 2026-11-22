@@ -9,6 +9,7 @@ import queue
 import signal
 import sys
 import time
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -77,13 +78,50 @@ class TracePipeline:
         self._offset_manager = offset_manager
         self._emit_sink: DagEmitSink = emit_sink or OffsetDurabilitySink(offset_manager)
         self._pending_tasks: set[asyncio.Task[None]] = set()
+        self._task_metadata: dict[
+            asyncio.Task[None], tuple[PendingDag, dict[TopicPartition, int | None]]
+        ] = {}
+        self._pending_emissions: dict[
+            tuple[str, str], list[tuple[TopicPartition, int, int | None]]
+        ] = {}
+        self._retry_dags: deque[tuple[PendingDag, dict[TopicPartition, int | None]]] = deque()
         self._logger = get_logger("trace_pipeline", stage="dag_assembly")
 
-    async def _enrich_and_emit(self, pending: PendingDag) -> None:
+    def _is_assignment_current(self, generations: dict[TopicPartition, int | None]) -> bool:
+        for tp, expected_gen in generations.items():
+            if (
+                expected_gen is not None
+                and self._offset_manager.partition_generation(tp) != expected_gen
+            ):
+                return False
+        return True
+
+    def _capture_generations(self, pending: PendingDag) -> dict[TopicPartition, int | None]:
+        return {
+            tp: self._offset_manager.partition_generation(tp)
+            for tp, _ in pending.contributing_offsets
+        }
+
+    async def _enrich_and_emit(
+        self,
+        pending: PendingDag,
+        generations: dict[TopicPartition, int | None],
+    ) -> None:
+        trace_key = (pending.tenant_id, pending.trace_id)
         try:
+            if not self._is_assignment_current(generations):
+                self._pending_emissions.pop(trace_key, None)
+                return
             resolution = await self._provenance_resolver.resolve_batch(pending.provenance_keys)
+            if not self._is_assignment_current(generations):
+                self._pending_emissions.pop(trace_key, None)
+                return
             graph = build_provenance_graph(pending, resolution.resolved)
             await self._emit_sink.emit(graph, pending.contributing_offsets)
+        except asyncio.CancelledError:
+            self._pending_emissions.pop(trace_key, None)
+            self._state_machine.clear_completed(pending.tenant_id, pending.trace_id)
+            raise
         except Exception as exc:
             self._logger.error(
                 "dag_emission_failed",
@@ -91,42 +129,119 @@ class TracePipeline:
                 tenant_id=pending.tenant_id,
                 error=type(exc).__name__,
             )
+            if self._is_assignment_current(generations):
+                self._retry_dags.append((pending, generations))
+            else:
+                self._pending_emissions.pop(trace_key, None)
+                self._state_machine.clear_completed(pending.tenant_id, pending.trace_id)
+            return
+
+        waiting_offsets = self._pending_emissions.pop(trace_key, [])
+        for late_tp, late_offset, late_gen in waiting_offsets:
+            self._offset_manager.mark_durable(late_tp, late_offset, generation=late_gen)
+
+    def _schedule_task(
+        self,
+        pending: PendingDag,
+        generations: dict[TopicPartition, int | None],
+    ) -> None:
+        trace_key = (pending.tenant_id, pending.trace_id)
+        self._pending_emissions.setdefault(trace_key, [])
+        task = asyncio.create_task(self._enrich_and_emit(pending, generations))
+        self._pending_tasks.add(task)
+        self._task_metadata[task] = (pending, generations)
+
+        def _on_done(done_task: asyncio.Task[None]) -> None:
+            self._pending_tasks.discard(done_task)
+            self._task_metadata.pop(done_task, None)
+
+        task.add_done_callback(_on_done)
 
     def _schedule_emissions(self, dags: Iterable[PendingDag]) -> int:
         scheduled = 0
         for pending in dags:
-            task = asyncio.create_task(self._enrich_and_emit(pending))
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._pending_tasks.discard)
+            generations = self._capture_generations(pending)
+            self._schedule_task(pending, generations)
             scheduled += 1
         return scheduled
+
+    def _drain_retry_dags(self) -> int:
+        if not self._retry_dags:
+            return 0
+        count = 0
+        batch = list(self._retry_dags)
+        self._retry_dags.clear()
+        for pending, generations in batch:
+            if self._is_assignment_current(generations):
+                self._schedule_task(pending, generations)
+                count += 1
+            else:
+                self._pending_emissions.pop((pending.tenant_id, pending.trace_id), None)
+                self._state_machine.clear_completed(pending.tenant_id, pending.trace_id)
+        return count
 
     async def handle_span(self, tp: TopicPartition, offset: int, span: TraceSpanRecord) -> None:
         """Synchronously correlate an incoming span without blocking the Kafka poll loop."""
         result = self._state_machine.ingest_span(tp, offset, span)
+        trace_key = (span.tenant_id, span.trace_id)
         for durable_tp, durable_offset in result.immediate_durable_offsets:
-            self._offset_manager.mark_durable(durable_tp, durable_offset)
+            waiting = self._pending_emissions.get(trace_key)
+            if waiting is not None:
+                waiting.append(
+                    (
+                        durable_tp,
+                        durable_offset,
+                        self._offset_manager.partition_generation(durable_tp),
+                    )
+                )
+            else:
+                self._offset_manager.mark_durable(durable_tp, durable_offset)
         if result.ready_dags:
             self._schedule_emissions(result.ready_dags)
 
     async def tick_and_flush(self, now_ms: int | None = None) -> int:
         """Advance the bucketed time-wheel and schedule emission for expired partial DAGs."""
+        scheduled = self._drain_retry_dags()
         ts_ms = int(time.monotonic() * 1000) if now_ms is None else now_ms
         expired = self._state_machine.advance_time(ts_ms)
-        if not expired:
-            return 0
-        return self._schedule_emissions(expired)
+        if expired:
+            scheduled += self._schedule_emissions(expired)
+        return scheduled
 
     def on_partitions_revoked(self, revoked: Iterable[TopicPartition]) -> None:
-        """Drop in-memory open traces for revoked partitions so Kafka replays cleanly."""
-        self._state_machine.on_partitions_revoked(revoked)
+        """Drop in-memory open traces and cancel/drop emissions for revoked partitions."""
+        revoked_set = set(revoked)
+        self._state_machine.on_partitions_revoked(revoked_set)
+        if not revoked_set:
+            return
+
+        for task, (pending, _generations) in list(self._task_metadata.items()):
+            if any(tp in revoked_set for tp, _ in pending.contributing_offsets):
+                task.cancel()
+                self._pending_emissions.pop((pending.tenant_id, pending.trace_id), None)
+                self._state_machine.clear_completed(pending.tenant_id, pending.trace_id)
+
+        if self._retry_dags:
+            kept: deque[tuple[PendingDag, dict[TopicPartition, int | None]]] = deque()
+            for pending, generations in self._retry_dags:
+                if any(tp in revoked_set for tp, _ in pending.contributing_offsets):
+                    self._pending_emissions.pop((pending.tenant_id, pending.trace_id), None)
+                    self._state_machine.clear_completed(pending.tenant_id, pending.trace_id)
+                else:
+                    kept.append((pending, generations))
+            self._retry_dags = kept
 
     async def flush_pending_emissions(self) -> None:
-        """Await all currently scheduled DAG enrichment/emission tasks."""
+        """Await all currently scheduled DAG enrichment/emission tasks and one retry pass."""
+        self._drain_retry_dags()
         if not self._pending_tasks:
             return
         pending = list(self._pending_tasks)
         await asyncio.gather(*pending, return_exceptions=True)
+        if self._retry_dags:
+            self._drain_retry_dags()
+            if self._pending_tasks:
+                await asyncio.gather(*list(self._pending_tasks), return_exceptions=True)
 
 
 def install_event_loop() -> str:

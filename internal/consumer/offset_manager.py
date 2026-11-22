@@ -13,6 +13,7 @@ from aiokafka import OffsetAndMetadata, TopicPartition
 class _PartitionOffsetState:
     """Tracks in-flight and resolved offsets for a single Kafka partition."""
 
+    generation: int = 0
     pending_queue: deque[int] = field(default_factory=deque)
     pending_set: set[int] = field(default_factory=set)
     resolved_set: set[int] = field(default_factory=set)
@@ -56,11 +57,22 @@ class OffsetManager:
 
     def __init__(self) -> None:
         self._partitions: dict[TopicPartition, _PartitionOffsetState] = {}
+        self._generation_counter: int = 0
+
+    def _next_generation(self) -> int:
+        self._generation_counter += 1
+        return self._generation_counter
 
     def on_partitions_assigned(self, partitions: Iterable[TopicPartition]) -> None:
         """Initialize tracking state for newly assigned partitions."""
         for tp in partitions:
-            self._partitions.setdefault(tp, _PartitionOffsetState())
+            if tp not in self._partitions:
+                self._partitions[tp] = _PartitionOffsetState(generation=self._next_generation())
+
+    def partition_generation(self, tp: TopicPartition) -> int | None:
+        """Return the current assignment generation for ``tp``, if tracked."""
+        state = self._partitions.get(tp)
+        return state.generation if state is not None else None
 
     def on_partitions_revoked(
         self, partitions: Iterable[TopicPartition]
@@ -79,14 +91,20 @@ class OffsetManager:
 
     def track_fetched(self, tp: TopicPartition, offset: int) -> None:
         """Record a fetched Kafka offset as in-flight for its partition."""
-        state = self._partitions.setdefault(tp, _PartitionOffsetState())
+        state = self._partitions.get(tp)
+        if state is None:
+            state = _PartitionOffsetState(generation=self._next_generation())
+            self._partitions[tp] = state
         state.track_fetched(offset)
 
-    def mark_durable(self, tp: TopicPartition, offset: int) -> None:
-        """Mark an offset durable after ClickHouse flush ACK."""
+    def mark_durable(self, tp: TopicPartition, offset: int, generation: int | None = None) -> None:
+        """Mark an offset durable after ClickHouse flush ACK, rejecting stale generations."""
         state = self._partitions.get(tp)
-        if state is not None:
-            state.mark_resolved(offset)
+        if state is None:
+            return
+        if generation is not None and state.generation != generation:
+            return
+        state.mark_resolved(offset)
 
     def mark_quarantined(self, tp: TopicPartition, offset: int) -> None:
         """Mark a corrupt or oversized offset resolved so it does not deadlock commits."""

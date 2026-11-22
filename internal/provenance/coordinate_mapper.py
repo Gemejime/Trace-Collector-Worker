@@ -23,7 +23,10 @@ def _to_finite_float(raw: object) -> float:
     if isinstance(raw, bool):
         return 0.0
     if isinstance(raw, (int, float)):
-        val = float(raw)
+        try:
+            val = float(raw)
+        except OverflowError:
+            return 0.0
         return val if math.isfinite(val) else 0.0
     try:
         val = float(str(raw))
