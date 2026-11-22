@@ -1,0 +1,117 @@
+openapi: 3.1.0
+info:
+  title: RAG Trace Collector Worker API
+  version: 1.0.0
+  description: |
+    Observability, Kubernetes health probe, and OpenAPI contract surface for the
+    `rag-trace-collector-worker` asynchronous Kafka-to-ClickHouse DAG assembly microservice.
+servers:
+  - url: http://localhost:8080
+    description: Local worker HTTP telemetry & health server
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Kubernetes Liveness Probe
+      description: Returns 200 OK if the supervisor process and worker pool are alive.
+      responses:
+        "200":
+          description: Worker supervisor is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /ready:
+    get:
+      operationId: getReady
+      summary: Kubernetes Readiness Probe
+      description: |
+        Checks Kafka consumer group assignment, Redis Cluster provenance cache reachability,
+        ClickHouse native TCP connection pool, and graceful drain state.
+      responses:
+        "200":
+          description: Worker is ready to consume and sink trace spans
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+        "503":
+          description: Worker is draining or a downstream dependency probe failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessStatus"
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus Metrics Scrape Endpoint
+      description: Exposes worker throughput, time-wheel evictions, LRU hit ratio, ClickHouse flush latency, and jemalloc mallctl counters.
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+  /openapi.yaml:
+    get:
+      operationId: getOpenApiSpec
+      summary: Raw OpenAPI 3.1 Specification
+      description: Serves the raw OpenAPI 3.1 YAML specification for this microservice.
+      responses:
+        "200":
+          description: OpenAPI 3.1 YAML document
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /docs:
+    get:
+      operationId: getDocs
+      summary: Interactive API Documentation UI
+      description: Serves the Swagger UI interface backed by `/openapi.yaml`.
+      responses:
+        "200":
+          description: HTML documentation page
+          content:
+            text/html:
+              schema:
+                type: string
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - alive
+          example: alive
+        active_workers:
+          type: integer
+          minimum: 0
+          example: 4
+    ReadinessStatus:
+      type: object
+      required:
+        - status
+        - checks
+      properties:
+        status:
+          type: string
+          enum:
+            - ready
+            - draining
+            - not_ready
+          example: ready
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            kafka: ok
+            redis: ok
+            clickhouse: ok
+            disk_wal: ok
