@@ -10,10 +10,10 @@
 
 ## Python 3.12+ & Code Quality Standards
 
-- **Runtime Target**: Python 3.12+ with `uvloop` and `jemalloc` (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so`, `MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:2000`).
+- **Runtime Target**: Python 3.12+ with `uvloop` (gated via `sys_platform != "win32"` in `pyproject.toml` with `asyncio` fallback for Windows local tests) and `jemalloc` (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so`, `MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:2000`; `jemalloc_stats.py` degrades cleanly when `libjemalloc.so` is absent).
 - **Linter, Formatter & Typechecker**:
   - Formatter & Linter: `ruff format --check .` and `ruff check .`
-  - Strict Type Checking: `mypy --strict cmd internal` (all functions, methods, and dataclasses/models must have explicit type annotations)
+  - Strict Type Checking: `mypy --strict cmd internal` (all functions, methods, and dataclasses/models must have explicit type annotations; Protobuf codegen uses `mypy-protobuf` `.pyi` stubs via `Makefile`)
 - **Clean Architecture & Dependency Wiring**:
   - Keep domain logic (`internal/graph/`, `internal/provenance/coordinate_mapper.py`) pure Python with zero network I/O dependencies.
   - Wire infrastructure clients (`kafka_consumer.py`, `redis_client.py`, `native_client.py`, `disk_wal.py`) explicitly in `cmd/worker/process_runner.py`.
@@ -36,8 +36,8 @@
    - On bucket expiration, `state_machine.py` MUST flag incomplete graphs with `is_partial = True` and emit surviving spans to the batch buffer without raising `AttributeError` or `NoneType` errors.
    - `rank_tracker.py` computes deterministic rank transition deltas ($\text{Dense/Sparse} \rightarrow \text{RRF} \rightarrow \text{Cross-Encoder}$).
 4. **Two-Tier ClickHouse Micro-Batching & Atomic Offsets (`internal/storage/`, `internal/consumer/`)**:
-   - `batch_buffer.py` flushes via `native_client.py` (native TCP protocol, never HTTP or single-row inserts) upon hitting `50,000` records OR `2.0` seconds, whichever occurs first.
-   - `offset_manager.py` commits Kafka offsets **if and only after** ClickHouse confirms micro-batch writes to disk.
+   - `batch_buffer.py` flushes via `native_client.py` (`asynch` / `clickhouse-driver` native TCP protocol with `insert_deduplicate=1`, never HTTP or single-row inserts) upon hitting `50,000` records OR `2.0` seconds, whichever occurs first.
+   - `offset_manager.py` commits Kafka offsets **if and only after** ClickHouse confirms micro-batch writes to disk. During ClickHouse outages, `disk_wal.py` spools micro-batches and `kafka_consumer.py` pauses partition consumption while continuing `poll()` heartbeats within `max.poll.interval.ms` to prevent rebalance storms.
 
 ---
 

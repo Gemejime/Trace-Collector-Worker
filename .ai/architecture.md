@@ -12,8 +12,8 @@
 | **DAG Correlation** | Bucketed Time-Wheel Ring Buffer | Low-overhead TTL eviction for out-of-order spans; flags `is_partial = true` on expiry |
 | **Analytical Sink** | ClickHouse 24.3+ (`ReplicatedMergeTree`) | Native TCP micro-batches (`50,000` rows or `2.0s`), partitioned `toYYYYMM(event_date)`, `async_insert=1` burst fallback |
 | **Outage Resilience** | Local Disk WAL (`disk_wal.py`) | Pauses Kafka offset advancement and spools micro-batches to disk during ClickHouse outages |
-| **Observability HTTP** | HTTP Server (`:8080`) + Prometheus | `/healthz`, `/ready`, `/metrics`, `/openapi.yaml`, `/docs` |
-| **Autoscaling** | Kubernetes + KEDA `ScaledObject` | Min 4 / Max 16 replicas driven by Kafka Consumer Group lag ($\ge 5,000$ messages/process) |
+| **Observability HTTP** | HTTP Server (`:8080`) + Prometheus | `/healthz`, `/ready`, `/metrics` (`PROMETHEUS_MULTIPROC_DIR`), `/openapi.yaml`, `/docs` |
+| **Autoscaling** | Kubernetes + KEDA `ScaledObject` | Min 4 / Max 16 replicas driven by Kafka Consumer Group lag ($\ge 5,000$ messages/process); note 32 partitions cap active consumers to 2/pod at 16 replicas unless topic partitions expand to 64 |
 
 ---
 
@@ -23,8 +23,8 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
 
 ### Layer 1: API & Routing
 - **Entry Points (`cmd/worker/main.py`, `cmd/worker/process_runner.py`)**:
-  - `main.py` acts as the supervisor entrypoint: loads 12-factor configuration, spawns and monitors the fixed pool of worker subprocesses, starts the HTTP telemetry/health server (`:8080`), and handles `SIGINT`/`SIGTERM` graceful shutdown.
-  - `process_runner.py` initializes each subprocess's isolated `uvloop` event loop, binds its assigned Kafka partitions, warms up Redis Cluster and ClickHouse native TCP pools, and drains in-flight batches on shutdown.
+  - `main.py` acts as the supervisor entrypoint: loads 12-factor configuration, spawns and monitors the fixed pool of worker subprocesses, starts the HTTP telemetry/health server (`:8080`) using `prometheus_client.multiprocess.MultiProcessCollector` (`PROMETHEUS_MULTIPROC_DIR=/tmp/prom-multiproc`) and worker IPC health heartbeats, and handles `SIGINT`/`SIGTERM` graceful shutdown.
+  - `process_runner.py` initializes each subprocess's isolated `uvloop` event loop, binds its assigned Kafka partitions, warms up Redis Cluster and ClickHouse native TCP pools, reports dependency readiness to the supervisor over IPC, and drains in-flight batches on shutdown.
 - **Endpoints & Routing (`internal/telemetry/health.py`, `internal/telemetry/metrics.py`)**:
   - HTTP Observability & Control Surface (`:8080`): `GET /healthz`, `GET /ready`, `GET /metrics`, `GET /openapi.yaml`, `GET /docs`.
   - Stream Ingress Contract: Kafka topic `rag-diagnostic-traces` consuming Protobuf v3 `TraceSpanRecord` envelopes.
@@ -71,7 +71,9 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
 - **Data Protection & Secured Logging**:
   - TLS in transit; structured JSON logging with strict redaction of credentials, DSNs, raw chunk text, and PII/PHI.
 - **Container Hardening**:
-  - Multi-stage `Dockerfile` running as non-root user with `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so`, `readOnlyRootFilesystem: true` (with dedicated ephemeral/PVC mount only for `disk_wal.py` spillover), and dropped Linux capabilities.
+  - Multi-stage `Dockerfile` running as non-root user with `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so`, `readOnlyRootFilesystem: true` (with dedicated writable mounts only for `/var/spool/trace-wal` and `/tmp/prom-multiproc`), and dropped Linux capabilities.
+- **Per-Process Memory Budget**:
+  - With 3–4 subprocesses per pod, each subprocess targets $\le 450\text{ MiB}$ RSS (50k LRU + time-wheel + 50k batch buffer) so aggregate pod RSS (`sum(trace_worker_jemalloc_resident_bytes)`) remains strictly $\le 2.0\text{ GiB}$.
 
 ### Layer 5: Observability & Quality
 - **Structured Logging**: JSON logs with `trace_id`, `span_id`, `tenant_id`, `worker_pid`, `partition`, `stage`, and `duration_ms`.
@@ -88,9 +90,9 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
   - `trace_worker_clickhouse_errors_total` (Counter)
 - **Production Alert Rules**:
   - *Elevated Consumer Partition Lag (Warning)*: Kafka lag $> 50,000$ records across consumer group for $> 3\text{ min}$.
-  - *Cache Resolution Degradation (Warning)*: Provenance resolution ratio $< 95\%$ over 5-minute window.
+  - *Cache Resolution Degradation (Warning / SLO Breach)*: Provenance resolution ratio $< 99.9\%$ (SLO breach warning) or $< 95\%$ (critical degradation) over 5-minute window.
   - *ClickHouse Native Ingestion Error (Page)*: `rate(trace_worker_clickhouse_errors_total[2m]) > 0` for $> 1\text{ min}$.
-  - *Native Memory Fragmentation Breach (Critical)*: `jemalloc.resident` $> 85\%$ of container memory limit for $> 2\text{ min}$.
+  - *Native Memory Fragmentation Breach (Critical)*: `sum(trace_worker_jemalloc_resident_bytes)` $> 85\%$ of container memory limit (`2.5 GiB`) for $> 2\text{ min}$.
 - **Health Checks & Graceful Error Handling**:
   - `/healthz` (liveness) and `/ready` (readiness probing Kafka, Redis, ClickHouse, and disk WAL); graceful connection draining on `SIGTERM`.
 

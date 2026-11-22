@@ -27,7 +27,7 @@
 
 1. **Multi-Stage Non-Root Container (`deployments/docker/Dockerfile`)**:
    - Non-root UID (`runAsNonRoot: true`), `allowPrivilegeEscalation: false`, `capabilities: drop: ["ALL"]`.
-   - `readOnlyRootFilesystem: true` with dedicated `/var/spool/trace-wal` mount for `disk_wal.py`.
+   - `readOnlyRootFilesystem: true` with dedicated `/var/spool/trace-wal` mount for `disk_wal.py` and `/tmp/prom-multiproc` `emptyDir` mount for `PROMETHEUS_MULTIPROC_DIR`.
 2. **Kubernetes Network Policies**:
    - **Ingress**: Restricted to Prometheus scraper on `:8080` (`/metrics`) and kubelet probes (`/healthz`, `/ready`).
    - **Egress**: Allowed only to Apache Kafka 3.7+ brokers, Redis 7.2 Cluster (`:6379`), ClickHouse 24.3+ native TCP (`:9000` / `:9440` TLS), and cluster DNS (`:53`). General external internet egress and Temporal gRPC egress are strictly denied.
