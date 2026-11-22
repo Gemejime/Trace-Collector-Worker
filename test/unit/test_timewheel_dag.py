@@ -175,8 +175,8 @@ def test_partition_revocation_drops_open_traces_without_emitting() -> None:
     dropped = sm.on_partitions_revoked([tp0])
     assert dropped == 1
     assert sm.open_trace_count == 1
-    assert "t-revoked" not in wheel
-    assert "t-kept" in wheel
+    assert ("tenant-a", "t-revoked") not in wheel
+    assert ("tenant-a", "t-kept") in wheel
 
 
 @pytest.mark.asyncio
@@ -240,3 +240,129 @@ async def test_trace_pipeline_end_to_end_with_offset_durability() -> None:
     assert len(sink.graphs) == 1
     assert sink.graphs[0].nodes[0].doc_version == 4
     assert offset_mgr.committable_offsets()[tp].offset == 1
+
+
+def test_expected_span_count_waits_for_all_spans_even_with_terminal_first() -> None:
+    tp = TopicPartition("rag-diagnostic-traces", 0)
+    wheel = BucketedTimeWheel(tick_ms=50, expiry_ms=1500, start_ms=0)
+    sm = DagStateMachine(timewheel=wheel, max_open_traces=100)
+
+    res1 = sm.ingest_span(
+        tp,
+        0,
+        _make_span("t-multi", "s-term", is_terminal=True, expected_span_count=2),
+    )
+    assert res1.ready_dags == ()
+    assert sm.open_trace_count == 1
+
+    res2 = sm.ingest_span(
+        tp,
+        1,
+        _make_span("t-multi", "s-init", is_terminal=False, expected_span_count=2),
+    )
+    assert len(res2.ready_dags) == 1
+    assert res2.ready_dags[0].is_partial is False
+
+
+def test_cross_tenant_trace_id_isolation() -> None:
+    tp = TopicPartition("rag-diagnostic-traces", 0)
+    wheel = BucketedTimeWheel(tick_ms=50, expiry_ms=1500, start_ms=0)
+    sm = DagStateMachine(timewheel=wheel, max_open_traces=100)
+
+    res_a = sm.ingest_span(
+        tp,
+        0,
+        _make_span("shared-trace", "s-1", tenant_id="tenant-a", is_terminal=True),
+    )
+    assert len(res_a.ready_dags) == 1
+
+    # Same trace_id for tenant-b must NOT be suppressed by tenant-a's completion
+    res_b = sm.ingest_span(
+        tp,
+        1,
+        _make_span(
+            "shared-trace",
+            "s-2",
+            tenant_id="tenant-b",
+            is_terminal=False,
+            expected_span_count=2,
+        ),
+    )
+    assert res_b.ready_dags == ()
+    assert res_b.immediate_durable_offsets == ()
+    assert sm.open_trace_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_retains_failed_dag_and_blocks_premature_replay_durability() -> None:
+    class _EmptyRedis:
+        async def mget(self, keys: list[str]) -> list[bytes | None]:
+            return [None for _ in keys]
+
+    class _FlakySink:
+        def __init__(self, offset_mgr: OffsetManager) -> None:
+            self._offset_mgr = offset_mgr
+            self.attempts = 0
+            self.graphs: list[ProvenanceGraph] = []
+
+        async def emit(
+            self,
+            graph: ProvenanceGraph,
+            contributing_offsets: tuple[tuple[TopicPartition, int], ...],
+        ) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("transient sink failure")
+            self.graphs.append(graph)
+            for tp_item, off in contributing_offsets:
+                self._offset_mgr.mark_durable(tp_item, off)
+
+    tp = TopicPartition("rag-diagnostic-traces", 0)
+    offset_mgr = OffsetManager()
+    offset_mgr.on_partitions_assigned([tp])
+    offset_mgr.track_fetched(tp, 0)
+    offset_mgr.track_fetched(tp, 1)
+
+    wheel = BucketedTimeWheel(tick_ms=50, expiry_ms=1500, start_ms=0)
+    sm = DagStateMachine(timewheel=wheel, max_open_traces=100)
+    resolver = ProvenanceResolver(settings=WorkerSettings(), redis_client=_EmptyRedis())
+    sink = _FlakySink(offset_mgr)
+    pipeline = TracePipeline(
+        state_machine=sm,
+        provenance_resolver=resolver,
+        offset_manager=offset_mgr,
+        emit_sink=sink,
+    )
+
+    await pipeline.handle_span(tp, 0, _make_span("t-flaky", "s-1", is_terminal=True))
+    # First attempt fails; wait for first task without draining retry yet
+    if pipeline._pending_tasks:
+        import asyncio
+
+        await asyncio.gather(*list(pipeline._pending_tasks), return_exceptions=True)
+
+    # Replayed span arrives while retry is pending -> must NOT mark offset 1 durable yet
+    await pipeline.handle_span(tp, 1, _make_span("t-flaky", "s-1", is_terminal=True))
+    assert offset_mgr.committable_offsets() == {}
+
+    # Retry succeeds -> both offset 0 and replayed offset 1 become durable
+    await pipeline.flush_pending_emissions()
+    assert len(sink.graphs) == 1
+    assert offset_mgr.committable_offsets()[tp].offset == 2
+
+
+@pytest.mark.asyncio
+async def test_revocation_rejects_stale_completion_for_reassigned_partition() -> None:
+    tp = TopicPartition("rag-diagnostic-traces", 0)
+    offset_mgr = OffsetManager()
+    offset_mgr.on_partitions_assigned([tp])
+    gen1 = offset_mgr.partition_generation(tp)
+    offset_mgr.track_fetched(tp, 10)
+
+    offset_mgr.on_partitions_revoked([tp])
+    offset_mgr.on_partitions_assigned([tp])
+    offset_mgr.track_fetched(tp, 10)
+
+    # Stale completion from gen1 must be ignored for the new assignment
+    offset_mgr.mark_durable(tp, 10, generation=gen1)
+    assert offset_mgr.committable_offsets() == {}

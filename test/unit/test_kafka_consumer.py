@@ -93,9 +93,18 @@ async def test_consumer_quarantines_corrupt_and_oversized_records() -> None:
         kafka_max_payload_bytes=1024, kafka_offset_commit_interval_seconds=0.01
     )
     offset_mgr = OffsetManager()
+
+    async def mark_valid_durable(
+        tp_arg: TopicPartition, offset_arg: int, _span: TraceSpanRecord
+    ) -> None:
+        offset_mgr.mark_durable(tp_arg, offset_arg)
+
     consumer = KafkaSpanConsumer(
-        settings=settings, offset_manager=offset_mgr, consumer=fake_consumer
-    )  # type: ignore[arg-type]
+        settings=settings,
+        offset_manager=offset_mgr,
+        span_handler=mark_valid_durable,
+        consumer=fake_consumer,  # type: ignore[arg-type]
+    )
 
     await consumer.start()
     processed = await consumer.poll_once()

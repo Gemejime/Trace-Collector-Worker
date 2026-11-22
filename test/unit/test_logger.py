@@ -89,3 +89,50 @@ def test_logger_redacts_credentials_dsns_and_pii() -> None:
     assert record["nested"]["api_key"] == REDACTED
     assert record["nested"]["safe_doc_id"] == 42
     assert f"Bearer {REDACTED}" in record["message"]
+
+
+def test_logger_redacts_component_keys_basic_json_exceptions_and_objects() -> None:
+    class _SecretObj:
+        def __repr__(self) -> str:
+            return "SecretObj(token=obj-secret-999)"
+
+        def __structlog__(self) -> dict[str, str]:
+            return {"password": "structlog-secret-888"}
+
+    buf = io.StringIO()
+    configure_logging(level="INFO", stream=buf)
+    logger = get_logger("security_regression")
+
+    try:
+        raise RuntimeError(
+            "Auth failed: authorization: Basic dXNlcjpwYXNz "
+            '{"token": "json-token-777"} dsn=redis://:excpass@redis:6379'
+        )
+    except RuntimeError:
+        logger.error(
+            "exception_occurred",
+            customer_email="bob@example.com",
+            retrieved_chunk_text="sensitive raw chunk body",
+            safe_doc_id=101,
+            bad_obj=_SecretObj(),
+            exc_info=True,
+        )
+
+    output = buf.getvalue()
+    for leaked in (
+        "bob@example.com",
+        "sensitive raw chunk body",
+        "dXNlcjpwYXNz",
+        "json-token-777",
+        "excpass",
+        "obj-secret-999",
+        "structlog-secret-888",
+    ):
+        assert leaked not in output
+
+    record = json.loads(output.strip())
+    assert record["customer_email"] == REDACTED
+    assert record["retrieved_chunk_text"] == REDACTED
+    assert record["safe_doc_id"] == 101
+    assert record["bad_obj"] == "<_SecretObj>"
+    assert REDACTED in record["exception"]
