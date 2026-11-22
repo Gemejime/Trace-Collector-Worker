@@ -58,7 +58,7 @@ RUN groupadd --gid 10001 worker \
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
-COPY --chown=10001:10001 api/openapi/openapi.yaml /app/api/openapi/openapi.yaml
+COPY --chown=10001:10001 api/openapi/openapi.yaml /opt/venv/lib/python3.12/site-packages/api/openapi/openapi.yaml
 
 USER 10001:10001
 

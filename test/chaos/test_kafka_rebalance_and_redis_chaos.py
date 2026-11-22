@@ -24,10 +24,17 @@ class _SlowFlakyRedisClient:
         self._delay_s = delay_s
         self._fail_doc_ids = fail_doc_ids or set()
         self.calls = 0
+        self.started_event: asyncio.Event | None = None
+        self.release_event: asyncio.Event | None = None
 
     async def mget(self, keys: list[str]) -> list[bytes | None]:
         self.calls += 1
-        await asyncio.sleep(self._delay_s)
+        if self.started_event is not None:
+            self.started_event.set()
+        if self.release_event is not None:
+            await self.release_event.wait()
+        else:
+            await asyncio.sleep(self._delay_s)
         for key in keys:
             if key.startswith("{"):
                 doc_part = key[1:].split("}", 1)[0]
@@ -65,40 +72,46 @@ async def test_kafka_rebalance_storm_prevents_split_brain_and_stale_commits() ->
     )
 
     for storm_round in range(5):
-        offsets.on_partitions_assigned([tp0, tp1])
-        gen0 = offsets.partition_generation(tp0)
-        assert gen0 is not None
+        slow_redis.started_event = asyncio.Event()
+        slow_redis.release_event = asyncio.Event()
+        try:
+            offsets.on_partitions_assigned([tp0, tp1])
+            gen0 = offsets.partition_generation(tp0)
+            assert gen0 is not None
 
-        # Open trace on tp0 (incomplete) and complete trace on tp1 (in-flight Redis enrichment).
-        open_span = make_span(
-            trace_id=f"open-{storm_round}",
-            span_id="s0",
-            is_terminal=False,
-            expected_span_count=2,
-        )
-        ready_span = make_span(
-            trace_id=f"ready-{storm_round}",
-            span_id="s1",
-            is_terminal=True,
-            candidates=[make_candidate(doc_id=10 + storm_round, chunk_id="c1")],
-        )
-        offsets.track_fetched(tp0, storm_round * 10)
-        offsets.track_fetched(tp1, storm_round * 10)
-        await pipeline.handle_span(tp0, storm_round * 10, open_span)
-        await pipeline.handle_span(tp1, storm_round * 10, ready_span)
+            # Open trace on tp0 (incomplete) and complete trace on tp1 (in-flight Redis enrichment).
+            open_span = make_span(
+                trace_id=f"open-{storm_round}",
+                span_id="s0",
+                is_terminal=False,
+                expected_span_count=2,
+            )
+            ready_span = make_span(
+                trace_id=f"ready-{storm_round}",
+                span_id="s1",
+                is_terminal=True,
+                candidates=[make_candidate(doc_id=10 + storm_round, chunk_id="c1")],
+            )
+            offsets.track_fetched(tp0, storm_round * 10)
+            offsets.track_fetched(tp1, storm_round * 10)
+            await pipeline.handle_span(tp0, storm_round * 10, open_span)
+            await pipeline.handle_span(tp1, storm_round * 10, ready_span)
 
-        # Revoke immediately before slow Redis enrichment completes.
-        pipeline.on_partitions_revoked([tp0, tp1])
-        final_commits = offsets.on_partitions_revoked([tp0, tp1])
-        assert final_commits == {}
-        assert sm.open_trace_count == 0
+            # Wait until Redis enrichment has actually started before revoking.
+            await asyncio.wait_for(slow_redis.started_event.wait(), timeout=2.0)
+            pipeline.on_partitions_revoked([tp0, tp1])
+            final_commits = offsets.on_partitions_revoked([tp0, tp1])
+            assert final_commits == {}
+            assert sm.open_trace_count == 0
 
-        # Reassign tp0 and verify stale generation cannot mark durable.
-        offsets.on_partitions_assigned([tp0])
-        offsets.track_fetched(tp0, storm_round * 10)
-        offsets.mark_durable(tp0, storm_round * 10, generation=gen0)
-        assert offsets.committable_offsets() == {}
-        offsets.on_partitions_revoked([tp0])
+            # Reassign tp0 and verify stale generation cannot mark durable.
+            offsets.on_partitions_assigned([tp0])
+            offsets.track_fetched(tp0, storm_round * 10)
+            offsets.mark_durable(tp0, storm_round * 10, generation=gen0)
+            assert offsets.committable_offsets() == {}
+            offsets.on_partitions_revoked([tp0])
+        finally:
+            slow_redis.release_event.set()
 
     await pipeline.flush_pending_emissions()
     assert emitted == []

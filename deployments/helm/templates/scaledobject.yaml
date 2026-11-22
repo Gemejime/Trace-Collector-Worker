@@ -1,4 +1,12 @@
 {{- if .Values.keda.enabled }}
+{{- $protocol := .Values.kafka.securityProtocol | default "PLAINTEXT" }}
+{{- $useTls := or (eq $protocol "SSL") (eq $protocol "SASL_SSL") }}
+{{- $useSasl := or (eq $protocol "SASL_PLAINTEXT") (eq $protocol "SASL_SSL") }}
+{{- if ne $protocol "PLAINTEXT" }}
+{{- if not (and .Values.keda.triggerAuthentication.enabled .Values.keda.triggerAuthentication.name) }}
+{{- fail "keda.triggerAuthentication.enabled and keda.triggerAuthentication.name are required when kafka.securityProtocol is not PLAINTEXT" }}
+{{- end }}
+{{- end }}
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -28,7 +36,22 @@ spec:
         lagThreshold: {{ .Values.keda.lagThreshold | quote }}
         activationLagThreshold: {{ .Values.keda.activationLagThreshold | quote }}
         offsetResetPolicy: {{ .Values.kafka.autoOffsetReset | quote }}
-      {{- if .Values.keda.triggerAuthentication.enabled }}
+        {{- if $useTls }}
+        tls: "enable"
+        {{- end }}
+        {{- if $useSasl }}
+        {{- $mech := .Values.kafka.saslMechanism | default "" }}
+        {{- if eq $mech "SCRAM-SHA-256" }}
+        sasl: "scram_sha256"
+        {{- else if eq $mech "SCRAM-SHA-512" }}
+        sasl: "scram_sha512"
+        {{- else if eq $mech "PLAIN" }}
+        sasl: "plaintext"
+        {{- else }}
+        {{- fail (printf "Unsupported kafka.saslMechanism %q for KEDA Kafka trigger" $mech) }}
+        {{- end }}
+        {{- end }}
+      {{- if ne $protocol "PLAINTEXT" }}
       authenticationRef:
         name: {{ .Values.keda.triggerAuthentication.name | quote }}
       {{- end }}

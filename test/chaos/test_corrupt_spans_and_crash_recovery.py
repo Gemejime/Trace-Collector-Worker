@@ -20,6 +20,7 @@ from internal.graph.state_machine import DagStateMachine
 from internal.graph.timewheel import BucketedTimeWheel
 from internal.storage.clickhouse.batch_buffer import MicroBatchBuffer
 from internal.storage.spillover.disk_wal import DiskWal
+from internal.telemetry.metrics import MetricsRegistry
 from test.fixtures.trace_builders import build_multistage_dag_spans
 
 
@@ -75,11 +76,21 @@ def _crash_once_worker(
     heartbeat_queue: Any,
     stop_event: Any,
     crash_flag_path: str,
+    multiproc_dir: str = "",
+    crashed_pid_path: str = "",
 ) -> None:
+    if multiproc_dir:
+        metrics = MetricsRegistry(
+            worker_id=f"worker-{worker_index}",
+            multiproc_dir=multiproc_dir,
+        )
+        metrics.set_jemalloc_resident_bytes(1024 + worker_index)
     if worker_index == 0:
         try:
             fd = os.open(crash_flag_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
+            if crashed_pid_path:
+                Path(crashed_pid_path).write_text(str(os.getpid()), encoding="utf-8")
             raise SystemExit(137)
         except FileExistsError:
             pass
@@ -205,9 +216,15 @@ def test_supervisor_crash_recovery_cleans_prometheus_shard(tmp_path: Path) -> No
     )
     dead_pids: list[int] = []
     crash_flag = str(tmp_path / "crash.flag")
+    crashed_pid_file = tmp_path / "crashed.pid"
     supervisor = WorkerSupervisor(
         settings=settings,
-        worker_target=functools.partial(_crash_once_worker, crash_flag_path=crash_flag),
+        worker_target=functools.partial(
+            _crash_once_worker,
+            crash_flag_path=crash_flag,
+            multiproc_dir=str(multiproc_dir),
+            crashed_pid_path=str(crashed_pid_file),
+        ),
         on_worker_dead=dead_pids.append,
     )
     supervisor.start()
@@ -229,6 +246,10 @@ def test_supervisor_crash_recovery_cleans_prometheus_shard(tmp_path: Path) -> No
                 break
             time.sleep(0.05)
         assert len(dead_pids) == 1
+        crashed_pid = int(crashed_pid_file.read_text(encoding="utf-8"))
+        assert crashed_pid in dead_pids
+        assert not list(multiproc_dir.glob(f"*_{crashed_pid}.db"))
+        assert list(multiproc_dir.glob(f"*_{sibling_pid}.db"))
         assert replacement_pid is not None
         assert supervisor.active_worker_pids.get(1) == sibling_pid
     finally:

@@ -16,7 +16,7 @@ spec:
     canary:
       canaryService: {{ include "rag-trace-collector-worker.fullname" . }}
       steps:
-        {{- toYaml .Values.rollout.canary.steps | nindent 8 }}
+        {{- tpl (toYaml .Values.rollout.canary.steps) . | nindent 8 }}
   template:
     metadata:
       annotations:
@@ -102,9 +102,17 @@ metadata:
 spec:
   args:
     - name: canary-hash
-      valueFrom:
-        podTemplateHashValue: Latest
   metrics:
+    - name: canary-telemetry-presence
+      interval: 30s
+      count: 4
+      successCondition: "result[0] > 0"
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: {{ .Values.rollout.prometheusAddress | quote }}
+          query: |
+            count(trace_worker_provenance_resolution_ratio{namespace="{{ .Release.Namespace }}",rollouts_pod_template_hash="{{`{{args.canary-hash}}`}}"})
     - name: clickhouse-ingestion-error-rate
       interval: 30s
       count: 4
@@ -124,5 +132,5 @@ spec:
         prometheus:
           address: {{ .Values.rollout.prometheusAddress | quote }}
           query: |
-            avg(trace_worker_provenance_resolution_ratio{namespace="{{ .Release.Namespace }}",rollouts_pod_template_hash="{{`{{args.canary-hash}}`}}"}) or vector(1)
+            avg(trace_worker_provenance_resolution_ratio{namespace="{{ .Release.Namespace }}",rollouts_pod_template_hash="{{`{{args.canary-hash}}`}}"})
 {{- end }}

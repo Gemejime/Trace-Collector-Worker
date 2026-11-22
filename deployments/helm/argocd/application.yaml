@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/rag-platform/rag-trace-collector-worker.git
+    repoURL: https://github.com/Gemejime/Trace-Collector-Worker.git
     targetRevision: main
     path: deployments/helm
     helm:

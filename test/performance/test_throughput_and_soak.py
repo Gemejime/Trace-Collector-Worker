@@ -33,13 +33,20 @@ MAX_P95_LATENCY_SECONDS = 2.5
 
 
 class _BenchmarkClickHouseSink:
-    def __init__(self) -> None:
+    def __init__(self, submit_times: dict[str, float]) -> None:
         self.rows_written = 0
         self.last_flush_ts = time.perf_counter()
+        self._submit_times = submit_times
+        self.latencies: list[float] = []
 
     async def insert_graphs(self, graphs: Sequence[ProvenanceGraph]) -> int:
+        now = time.perf_counter()
         self.rows_written += len(graphs)
-        self.last_flush_ts = time.perf_counter()
+        self.last_flush_ts = now
+        for graph in graphs:
+            submitted = self._submit_times.pop(graph.trace_id, None)
+            if submitted is not None:
+                self.latencies.append(now - submitted)
         return len(graphs)
 
 
@@ -63,12 +70,19 @@ def _p95(samples: list[float]) -> float:
     return ordered[idx]
 
 
-async def _run_worker_pipeline_benchmark(
-    duration_seconds: float,
+def _setup_worker_pipeline_benchmark(
     tmp_dir: Path,
     worker_index: int = 0,
     batch_max_rows: int = 1000,
-) -> tuple[int, float, list[float], int]:
+) -> tuple[
+    TopicPartition,
+    OffsetManager,
+    TracePipeline,
+    MicroBatchBuffer,
+    _BenchmarkClickHouseSink,
+    dict[str, float],
+    Any,
+]:
     tp = TopicPartition("rag-diagnostic-traces", worker_index)
     settings = WorkerSettings(
         batch_max_rows=batch_max_rows,
@@ -83,7 +97,8 @@ async def _run_worker_pipeline_benchmark(
     for idx in range(500):
         lru.put(idx, f"chunk-{idx}", ChunkProvenance(1, "ph", 0, (0.1, 0.1, 0.9, 0.9)))
     resolver = ProvenanceResolver(settings=settings, lru_cache=lru, redis_client=object())
-    sink = _BenchmarkClickHouseSink()
+    submit_times: dict[str, float] = {}
+    sink = _BenchmarkClickHouseSink(submit_times=submit_times)
     wal = DiskWal(wal_dir=tmp_dir, worker_index=worker_index, max_bytes=16 * 1024 * 1024)
     pipeline = TracePipeline(state_machine=sm, provenance_resolver=resolver, offset_manager=offsets)
     buffer = MicroBatchBuffer(
@@ -94,15 +109,27 @@ async def _run_worker_pipeline_benchmark(
         on_traces_durable=pipeline.mark_traces_durable,
     )
     pipeline.set_emit_sink(buffer)
+    return tp, offsets, pipeline, buffer, sink, submit_times, (sm, lru, resolver, wal)
 
-    latencies: list[float] = []
+
+async def _run_benchmark_workload(
+    tp: TopicPartition,
+    offsets: OffsetManager,
+    pipeline: TracePipeline,
+    buffer: MicroBatchBuffer,
+    sink: _BenchmarkClickHouseSink,
+    submit_times: dict[str, float],
+    duration_seconds: float,
+    worker_index: int,
+    offset_start: int = 0,
+) -> tuple[int, float, list[float], int]:
+    lat_start_idx = len(sink.latencies)
     spans_processed = 0
-    offset = 0
+    offset = offset_start
     start = time.perf_counter()
     deadline = start + duration_seconds
 
     while time.perf_counter() < deadline:
-        batch_start = time.perf_counter()
         for trace_idx in range(200):
             tid = f"perf-{worker_index}-{offset}"
             chunk_idx = trace_idx % 500
@@ -115,16 +142,40 @@ async def _run_worker_pipeline_benchmark(
                 candidates=[make_candidate(doc_id=chunk_idx, chunk_id=f"chunk-{chunk_idx}")],
             )
             offsets.track_fetched(tp, offset)
+            submit_times[tid] = time.perf_counter()
             await pipeline.handle_span(tp, offset, span)
             offset += 1
             spans_processed += 1
         await pipeline.flush_pending_emissions()
         await buffer.flush_if_due()
-        latencies.append(time.perf_counter() - batch_start)
 
     await pipeline.flush_pending_emissions()
     await buffer.flush()
     elapsed = max(1e-6, time.perf_counter() - start)
+    return spans_processed, elapsed, list(sink.latencies[lat_start_idx:]), offset
+
+
+async def _run_worker_pipeline_benchmark(
+    duration_seconds: float,
+    tmp_dir: Path,
+    worker_index: int = 0,
+    batch_max_rows: int = 1000,
+) -> tuple[int, float, list[float], int]:
+    tp, offsets, pipeline, buffer, sink, submit_times, _refs = _setup_worker_pipeline_benchmark(
+        tmp_dir=tmp_dir,
+        worker_index=worker_index,
+        batch_max_rows=batch_max_rows,
+    )
+    spans_processed, elapsed, latencies, _ = await _run_benchmark_workload(
+        tp=tp,
+        offsets=offsets,
+        pipeline=pipeline,
+        buffer=buffer,
+        sink=sink,
+        submit_times=submit_times,
+        duration_seconds=duration_seconds,
+        worker_index=worker_index,
+    )
     jemalloc_stats = JemallocStatsScraper().scrape()
     rss_bytes = jemalloc_stats.resident_bytes if jemalloc_stats.available else _current_rss_bytes()
     return spans_processed, elapsed, latencies, rss_bytes
@@ -154,20 +205,36 @@ async def test_pipeline_throughput_and_flat_memory_smoke(
     tmp_path: Path,
 ) -> None:
     """Fast CI smoke benchmark verifying pipeline throughput, latency, and flat heap growth."""
+    tp, offsets, pipeline, buffer, sink, submit_times, _refs = _setup_worker_pipeline_benchmark(
+        tmp_dir=tmp_path,
+        worker_index=0,
+    )
     tracemalloc.start()
     try:
         half = max(0.5, soak_seconds / 2.0)
-        spans_1, elapsed_1, lat_1, _ = await _run_worker_pipeline_benchmark(
+        spans_1, elapsed_1, lat_1, next_offset = await _run_benchmark_workload(
+            tp=tp,
+            offsets=offsets,
+            pipeline=pipeline,
+            buffer=buffer,
+            sink=sink,
+            submit_times=submit_times,
             duration_seconds=half,
-            tmp_dir=tmp_path,
             worker_index=0,
+            offset_start=0,
         )
         snap_mid, _ = tracemalloc.get_traced_memory()
 
-        spans_2, elapsed_2, lat_2, _ = await _run_worker_pipeline_benchmark(
+        spans_2, elapsed_2, lat_2, _ = await _run_benchmark_workload(
+            tp=tp,
+            offsets=offsets,
+            pipeline=pipeline,
+            buffer=buffer,
+            sink=sink,
+            submit_times=submit_times,
             duration_seconds=half,
-            tmp_dir=tmp_path,
             worker_index=0,
+            offset_start=next_offset,
         )
         snap_end, peak_bytes = tracemalloc.get_traced_memory()
     finally:
