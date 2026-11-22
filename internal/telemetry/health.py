@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
-from prometheus_client import CollectorRegistry
 
 from internal.telemetry.logger import get_logger
 from internal.telemetry.metrics import generate_metrics_exposition
+
+if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
 
 _SWAGGER_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -216,6 +219,8 @@ class TelemetryHttpServer:
         self._runner: web.AppRunner | None = None
         self._thread: threading.Thread | None = None
         self._started_event = threading.Event()
+        self._stop_requested = threading.Event()
+        self._start_error: BaseException | None = None
         self._stop_future: asyncio.Future[None] | None = None
         self._bound_port: int = port
 
@@ -223,18 +228,28 @@ class TelemetryHttpServer:
     def bound_port(self) -> int:
         return self._bound_port
 
-    def start(self) -> None:
+    def start(self, timeout: float = 5.0) -> None:
         """Start the background event loop thread and bind the HTTP socket."""
         if self._thread is not None and self._thread.is_alive():
             return
         self._started_event.clear()
+        self._stop_requested.clear()
+        self._start_error = None
         self._thread = threading.Thread(
             target=self._run_thread,
             name="telemetry-http-server",
             daemon=True,
         )
         self._thread.start()
-        self._started_event.wait(timeout=5.0)
+        if not self._started_event.wait(timeout=timeout):
+            self.stop()
+            raise TimeoutError(
+                f"TelemetryHttpServer failed to bind {self._host}:{self._port} within {timeout}s"
+            )
+        if self._start_error is not None:
+            err = self._start_error
+            self.stop()
+            raise err
 
     def _run_thread(self) -> None:
         loop = asyncio.new_event_loop()
@@ -242,10 +257,20 @@ class TelemetryHttpServer:
         self._loop = loop
         try:
             loop.run_until_complete(self._serve(loop))
+        except BaseException as exc:
+            self._start_error = exc
+            self._started_event.set()
         finally:
+            self._runner = None
+            self._stop_future = None
             loop.close()
+            self._loop = None
 
     async def _serve(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._stop_future = loop.create_future()
+        if self._stop_requested.is_set():
+            self._started_event.set()
+            return
         app = build_telemetry_app(
             state=self._state,
             active_workers_fn=self._active_workers_fn,
@@ -254,28 +279,33 @@ class TelemetryHttpServer:
             openapi_path=self._openapi_path,
         )
         runner = web.AppRunner(app, access_log=None)
-        await runner.setup()
-        site = web.TCPSite(runner, host=self._host, port=self._port)
-        await site.start()
         self._runner = runner
-        if runner.addresses:
-            self._bound_port = int(runner.addresses[0][1])
-        self._stop_future = loop.create_future()
-        self._started_event.set()
-        self._logger.info("telemetry_http_started", host=self._host, port=self._bound_port)
         try:
-            await self._stop_future
+            await runner.setup()
+            if self._stop_requested.is_set():
+                self._started_event.set()
+                return
+            site = web.TCPSite(runner, host=self._host, port=self._port)
+            await site.start()
+            if runner.addresses:
+                self._bound_port = int(runner.addresses[0][1])
+            self._started_event.set()
+            self._logger.info("telemetry_http_started", host=self._host, port=self._bound_port)
+            if not self._stop_requested.is_set():
+                await self._stop_future
         finally:
             await runner.cleanup()
 
     def stop(self) -> None:
         """Stop the HTTP server and join its background thread."""
+        self._stop_requested.set()
         loop = self._loop
         stop_fut = self._stop_future
         if loop is not None and stop_fut is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(
-                lambda: None if stop_fut.done() else stop_fut.set_result(None)
-            )
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(
+                    lambda: None if stop_fut.done() else stop_fut.set_result(None)
+                )
         if self._thread is not None:
             self._thread.join(timeout=3.0)
             self._thread = None

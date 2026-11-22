@@ -4,16 +4,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from prometheus_client import (
-    REGISTRY,
-    CollectorRegistry,
-    Counter,
-    Gauge,
-    Histogram,
-    generate_latest,
-    multiprocess,
-)
+if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
 
 _FLUSH_LATENCY_BUCKETS: tuple[float, ...] = (
     0.005,
@@ -45,6 +39,8 @@ def mark_worker_process_dead(pid: int, multiproc_dir: str = "") -> None:
     target_dir = multiproc_dir.strip() or os.environ.get("PROMETHEUS_MULTIPROC_DIR", "").strip()
     if not target_dir:
         return
+    from prometheus_client import multiprocess
+
     multiprocess.mark_process_dead(pid, path=target_dir)  # type: ignore[no-untyped-call]
 
 
@@ -55,9 +51,14 @@ def generate_metrics_exposition(
     """Render Prometheus text exposition bytes for multiprocess or single-process mode."""
     target_dir = multiproc_dir.strip() or os.environ.get("PROMETHEUS_MULTIPROC_DIR", "").strip()
     if target_dir:
-        mp_registry = CollectorRegistry()
+        from prometheus_client import CollectorRegistry as RuntimeCollectorRegistry
+        from prometheus_client import generate_latest, multiprocess
+
+        mp_registry = RuntimeCollectorRegistry()
         multiprocess.MultiProcessCollector(mp_registry, path=target_dir)  # type: ignore[no-untyped-call]
         return generate_latest(mp_registry)
+    from prometheus_client import REGISTRY, generate_latest
+
     return generate_latest(registry or REGISTRY)
 
 
@@ -71,7 +72,12 @@ class MetricsRegistry:
         registry: CollectorRegistry | None = None,
     ) -> None:
         self.worker_id = worker_id
-        self.multiproc_dir = configure_prometheus_multiproc(multiproc_dir)
+        configured = configure_prometheus_multiproc(multiproc_dir)
+        self.multiproc_dir = configured or (
+            os.environ.get("PROMETHEUS_MULTIPROC_DIR", "").strip() or None
+        )
+        from prometheus_client import REGISTRY, Counter, Gauge, Histogram
+
         if registry is None:
             registry = REGISTRY
         self.registry = registry

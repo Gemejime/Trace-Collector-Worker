@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from typing import Any
 
 from clickhouse_driver import Client as ClickHouseDriverClient
@@ -94,6 +95,28 @@ class ClickHouseNativeClient:
             return client.execute(query, settings=query_settings)
         return client.execute(query)
 
+    async def _execute_in_thread_locked(
+        self,
+        query: str,
+        params: Any = None,
+        query_settings: dict[str, Any] | None = None,
+    ) -> Any:
+        """Run ``_execute_sync`` in a worker thread while keeping ``_io_lock`` held."""
+        exec_task = asyncio.create_task(
+            asyncio.to_thread(self._execute_sync, query, params, query_settings)
+        )
+        cancelled: asyncio.CancelledError | None = None
+        while not exec_task.done():
+            try:
+                await asyncio.shield(exec_task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        if cancelled is not None:
+            with contextlib.suppress(BaseException):
+                exec_task.exception()
+            raise cancelled
+        return exec_task.result()
+
     async def ensure_schemas(self) -> None:
         """Create ClickHouse database, tables, and materialized views if missing."""
         statements = build_schema_statements(
@@ -104,7 +127,7 @@ class ClickHouseNativeClient:
         async with self._io_lock:
             for stmt in statements:
                 try:
-                    await asyncio.to_thread(self._execute_sync, stmt)
+                    await self._execute_in_thread_locked(stmt)
                 except Exception as exc:
                     if self._metrics is not None:
                         self._metrics.inc_clickhouse_errors(type(exc).__name__)
@@ -115,11 +138,16 @@ class ClickHouseNativeClient:
                     self._reset_client()
                     raise
 
-    async def insert_graphs(self, graphs: Sequence[ProvenanceGraph]) -> int:
+    async def insert_graphs(
+        self,
+        graphs: Sequence[ProvenanceGraph],
+        *,
+        created_at: datetime | None = None,
+    ) -> int:
         """Insert a micro-batch of ``ProvenanceGraph`` records via native TCP."""
         if not graphs:
             return 0
-        rows = serialize_provenance_graph_batch(graphs)
+        rows = serialize_provenance_graph_batch(graphs, created_at=created_at)
         query_settings = {
             "insert_deduplicate": 1 if self._settings.clickhouse_insert_deduplicate else 0,
             "async_insert": 0,
@@ -127,8 +155,7 @@ class ClickHouseNativeClient:
         started = time.monotonic()
         async with self._io_lock:
             try:
-                await asyncio.to_thread(
-                    self._execute_sync,
+                await self._execute_in_thread_locked(
                     self._insert_sql,
                     rows,
                     query_settings,
@@ -152,7 +179,7 @@ class ClickHouseNativeClient:
         """Verify ClickHouse native TCP connectivity for readiness probes."""
         async with self._io_lock:
             try:
-                result = await asyncio.to_thread(self._execute_sync, "SELECT 1")
+                result = await self._execute_in_thread_locked("SELECT 1")
                 return bool(result)
             except Exception as exc:
                 if self._metrics is not None:

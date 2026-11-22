@@ -46,7 +46,7 @@ htmlcov/
 
 # Local WAL spillover & runtime artifacts
 *.wal
-spillover/
+/spillover/
 spillover_data/
 *.log
 tmp/

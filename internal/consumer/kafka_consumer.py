@@ -112,8 +112,27 @@ class KafkaSpanConsumer:
         self.quarantined_count = 0
 
     def is_healthy(self) -> bool:
-        """Return True when the Kafka consumer is started."""
+        """Return True when the Kafka consumer lifecycle is started."""
         return self._started and self._consumer is not None
+
+    async def check_health(self, timeout_seconds: float = 2.0) -> bool:
+        """Perform a bounded Kafka connectivity check while preserving lifecycle state."""
+        if not self.is_healthy() or self._consumer is None:
+            return False
+        topics_fn = getattr(self._consumer, "topics", None)
+        if callable(topics_fn):
+            try:
+                await asyncio.wait_for(topics_fn(), timeout=timeout_seconds)
+                return True
+            except Exception:
+                return False
+        partitions_fn = getattr(self._consumer, "partitions_for_topic", None)
+        if callable(partitions_fn):
+            try:
+                return partitions_fn(self._settings.kafka_topic) is not None
+            except Exception:
+                return False
+        return True
 
     def _create_consumer(self) -> AIOKafkaConsumer:
         kwargs: dict[str, Any] = {
@@ -289,8 +308,17 @@ class KafkaSpanConsumer:
                 hw = self._consumer.highwater(tp)
                 if hw is None:
                     continue
-                pos = await self._consumer.position(tp)
-                self._metrics.set_kafka_consumer_lag(tp.partition, max(0, int(hw) - int(pos)))
+                committed = await self._consumer.committed(tp)
+                if committed is None:
+                    beginning_fn = getattr(self._consumer, "beginning_offsets", None)
+                    if callable(beginning_fn):
+                        beginning = await beginning_fn([tp])
+                        baseline = int(beginning.get(tp, 0))
+                    else:
+                        baseline = 0
+                else:
+                    baseline = int(committed)
+                self._metrics.set_kafka_consumer_lag(tp.partition, max(0, int(hw) - baseline))
         except Exception:  # noqa: S110
             pass
 

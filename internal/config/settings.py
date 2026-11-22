@@ -131,6 +131,12 @@ class WorkerSettings(BaseSettings):
         if self.timewheel_expiry_seconds * 1000.0 < self.timewheel_tick_ms:
             raise ValueError("timewheel_expiry_seconds * 1000 must be >= timewheel_tick_ms")
 
+        if not self.clickhouse_insert_deduplicate:
+            raise ValueError(
+                "clickhouse_insert_deduplicate=False is disabled; insert deduplication is "
+                "required for replay safety"
+            )
+
         if self.clickhouse_async_insert:
             raise ValueError(
                 "clickhouse_async_insert=True is disabled; synchronous native TCP with "

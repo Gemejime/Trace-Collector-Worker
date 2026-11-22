@@ -5,8 +5,10 @@ from __future__ import annotations
 import contextlib
 import multiprocessing
 import queue
+import shutil
 import signal
 import sys
+import tempfile
 import time
 from cmd.worker.process_runner import WorkerHeartbeat, run_worker_process
 from collections import deque
@@ -294,10 +296,18 @@ class WorkerSupervisor:
 def main() -> None:
     """CLI entrypoint for rag-trace-worker."""
     settings = WorkerSettings()
+    owned_multiproc_dir: str | None = None
+    if not settings.prometheus_multiproc_dir.strip():
+        owned_multiproc_dir = tempfile.mkdtemp(prefix="rag-trace-prom-")
+        settings = settings.model_copy(update={"prometheus_multiproc_dir": owned_multiproc_dir})
     configure_prometheus_multiproc(settings.prometheus_multiproc_dir)
     configure_logging(settings.log_level)
     supervisor = WorkerSupervisor(settings=settings, enable_http_server=True)
-    sys.exit(supervisor.run())
+    try:
+        sys.exit(supervisor.run())
+    finally:
+        if owned_multiproc_dir is not None:
+            shutil.rmtree(owned_multiproc_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
