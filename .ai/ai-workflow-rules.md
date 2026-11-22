@@ -3,9 +3,9 @@
 ## Development Approach
 
 Build this microservice incrementally following a spec-driven workflow:
-- The specification documents in `tasks/` (specifically `RAG Trace Collector Worker Implementation Plan.pdf`) and context files in [`.ai/`](.) define system invariants, data structures, and operational boundaries.
-- Adhere strictly to the 5-layer backend architecture documented in [`.ai/architecture.md`](architecture.md) aligned with `tasks/Production Grade Backend Concepts.pdf`.
-- Implement against these specs without inferring undocumented dependencies or deviating from architectural decision records (ADR-001 through ADR-005).
+- The checked-in specification files in [`.ai/`](.) ([`project-overview.md`](project-overview.md), [`architecture.md`](architecture.md), [`doc-api.md`](doc-api.md), [`code-standards.md`](code-standards.md), [`security.md`](security.md), [`agents.md`](agents.md), and [`progress-tracker.md`](progress-tracker.md)) are the authoritative contributor contract defining system invariants, data structures, and operational boundaries. Any PDFs in `tasks/` (gitignored) are private planning material; all required constraints are captured in `.ai/`.
+- Adhere strictly to the 5-layer backend architecture documented in [`.ai/architecture.md`](architecture.md).
+- Implement against these checked-in specs without inferring undocumented dependencies or deviating from architectural decision records (ADR-001 through ADR-005, defined in [`.ai/progress-tracker.md`](progress-tracker.md)).
 
 ---
 
@@ -34,7 +34,7 @@ Build this microservice incrementally following a spec-driven workflow:
      - `docs:` for documentation updates
      - `tests:` for tests addition and modification
      - `chore:` for maintenance tasks and environment setup
-7. **Quality Gates**: `ruff check`, `ruff format --check`, `mypy --strict`, `bandit`, `pip-audit`, Spectral OpenAPI validation, and `pytest` must pass cleanly before any commit.
+7. **Quality Gates**: `ruff check`, `ruff format --check`, `mypy --strict cmd internal`, `bandit -r cmd internal -ll -ii`, `pip-audit`, Spectral OpenAPI validation, and `pytest test/unit -v` must pass cleanly before any commit when their target directories (`cmd/`, `internal/`, `test/unit/`) and Python source files exist; code checks begin once scaffolding is added and are not required for documentation-only commits.
 
 ---
 
@@ -42,9 +42,9 @@ Build this microservice incrementally following a spec-driven workflow:
 
 Before committing code, submitting changes, or marking a task complete:
 
-1. **Formatting & Linting**: Run `ruff format --check .` and `ruff check .`.
-2. **Strict Type Checking**: Run `mypy --strict cmd internal`.
-3. **Security & Secured Logging Audit**: Run `bandit -r cmd internal -ll -ii`, `pip-audit`, and verify zero `print()` calls, credentials, DSNs, raw chunk text, or PII/PHI in logs.
-4. **Automated Tests & Benchmarks**: Ensure `pytest test/unit -v` passes and time-wheel / coordinate mapping / micro-batching invariants hold.
+1. **Formatting & Linting**: Run `ruff format --check .` and `ruff check .` (when Python source files exist).
+2. **Strict Type Checking**: Run `mypy --strict cmd internal` (when `cmd/` and `internal/` scaffolding exists; not required for documentation-only commits).
+3. **Security & Secured Logging Audit**: Run `bandit -r cmd internal -ll -ii` and `pip-audit` (when `cmd/` and `internal/` scaffolding exists), and verify zero `print()` calls, credentials, DSNs, raw chunk text, or PII/PHI in logs.
+4. **Automated Tests & Benchmarks**: Ensure `pytest test/unit -v` passes (when `test/unit/` scaffolding exists; not required for documentation-only commits) and time-wheel / coordinate mapping / micro-batching invariants hold.
 5. **Doc API & OpenAPI Sync**: Confirm [`.ai/doc-api.md`](doc-api.md) and `api/openapi/openapi.yaml` reflect any new or modified endpoints, schemas, protos, Kafka/Redis/ClickHouse contracts, or metrics.
 6. **Progress Tracker**: Update [`.ai/progress-tracker.md`](progress-tracker.md) with session notes and completed items.
