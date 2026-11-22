@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package rag.trace.v1;
+
+// CandidateTrace captures per-stage retrieval and reranking signals for a chunk.
+// Sentinel value -1 indicates the candidate was absent from a given ranking stage.
+message CandidateTrace {
+  uint32 doc_id = 1;
+  string chunk_id = 2;
+  int32 dense_rank = 3;
+  int32 sparse_rank = 4;
+  int32 rrf_rank = 5;
+  int32 rerank_rank = 6;
+  double score = 7;
+  double logit = 8;
+}
+
+// TraceSpanRecord is emitted out-of-band by rag-search-orchestrator onto
+// Kafka topic `rag-diagnostic-traces` partitioned by hash(trace_id).
+message TraceSpanRecord {
+  string trace_id = 1;
+  string span_id = 2;
+  string parent_span_id = 3;
+  string tenant_id = 4;
+  string stage = 5;
+  int64 start_time_ns = 6;
+  int64 end_time_ns = 7;
+  bool is_terminal = 8;
+  uint32 expected_span_count = 9;
+  repeated CandidateTrace candidates = 10;
+  map<string, string> eval_tags = 11;
+}
