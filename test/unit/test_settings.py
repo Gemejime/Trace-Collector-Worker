@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -72,3 +74,63 @@ def test_settings_fetch_memory_and_timeout_bounds() -> None:
             timewheel_expiry_seconds=0.01,
             timewheel_tick_ms=50,
         )
+
+
+def test_settings_loads_dotenv_file_and_respects_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WORKER_PROCESS_COUNT", raising=False)
+    monkeypatch.delenv("KAFKA_TOPIC", raising=False)
+    monkeypatch.delenv("TIMEWHEEL_EXPIRY_SECONDS", raising=False)
+
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "WORKER_PROCESS_COUNT=2\nKAFKA_TOPIC=custom-traces\nTIMEWHEEL_EXPIRY_SECONDS=2.5\n",
+        encoding="utf-8",
+    )
+
+    first = WorkerSettings()
+    assert first.worker_process_count == 2
+    assert first.kafka_topic == "custom-traces"
+    assert first.timewheel_expiry_seconds == 2.5
+
+    dotenv_path.write_text(
+        "WORKER_PROCESS_COUNT=6\nKAFKA_TOPIC=updated-traces\nTIMEWHEEL_EXPIRY_SECONDS=3.0\n",
+        encoding="utf-8",
+    )
+
+    second = WorkerSettings()
+    assert second.worker_process_count == 6
+    assert second.kafka_topic == "updated-traces"
+    assert second.timewheel_expiry_seconds == 3.0
+
+
+def test_dotenv_example_covers_all_worker_settings_and_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    example_text = (repo_root / ".env.example").read_text(encoding="utf-8")
+
+    declared_keys: set[str] = set()
+    for raw_line in example_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            candidate = line.lstrip("#").strip()
+            if "=" in candidate:
+                key = candidate.split("=", 1)[0].strip()
+                if key.isupper() and "_" in key:
+                    declared_keys.add(key.lower())
+        elif "=" in line:
+            key = line.split("=", 1)[0].strip()
+            declared_keys.add(key.lower())
+
+    missing_fields = set(WorkerSettings.model_fields.keys()) - declared_keys
+    assert not missing_fields, f"Missing fields in .env.example: {sorted(missing_fields)}"
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(example_text, encoding="utf-8")
+    loaded = WorkerSettings()
+    assert loaded.kafka_topic == "rag-diagnostic-traces"
