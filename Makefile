@@ -1,7 +1,7 @@
 PYTHON ?= python
 PROTO_DIR := api/proto/v1
 
-.PHONY: proto lint format-check typecheck security test-unit ensure-topic verify
+.PHONY: proto lint format-check typecheck security test-unit test-chaos test-perf helm-lint ensure-topic verify
 
 proto:
 	$(PYTHON) -m grpc_tools.protoc \
@@ -27,7 +27,18 @@ security:
 test-unit:
 	pytest test/unit -v
 
+test-chaos:
+	pytest test/chaos -v -m "not integration"
+
+test-perf:
+	pytest test/performance -v -m "not soak"
+
+helm-lint:
+	helm lint deployments/helm
+	helm template rag-trace-worker deployments/helm --set rollout.enabled=false > /dev/null
+	helm template rag-trace-worker deployments/helm --set rollout.enabled=true > /dev/null
+
 ensure-topic:
 	$(PYTHON) scripts/ensure_kafka_topic.py
 
-verify: format-check lint typecheck security test-unit
+verify: format-check lint typecheck security test-unit test-chaos test-perf

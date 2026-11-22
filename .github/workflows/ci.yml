@@ -191,10 +191,22 @@ jobs:
             pip install -e ".[dev]" || pip install -e . || true
           fi
 
-      - name: Run Unit Test Suite
+      - name: Run Deterministic Test Suites (Unit, Integration, Chaos, Perf Smoke)
         run: |
-          if [ -d test/unit ] && find test/unit -name "test_*.py" | grep -q .; then
-            pytest test/unit -v --tb=short
-          else
-            echo "No unit tests in test/unit yet (Phase 0); skipping pytest."
-          fi
+          pytest test/unit test/integration test/chaos test/performance -v --tb=short -m "not integration and not soak"
+
+  helm-validation:
+    name: Helm Lint & Template Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint and Template Helm Chart
+        run: |
+          helm lint deployments/helm
+          helm template rag-trace-worker deployments/helm --set rollout.enabled=false > /dev/null
+          helm template rag-trace-worker deployments/helm --set rollout.enabled=true > /dev/null

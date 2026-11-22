@@ -27,6 +27,7 @@ def test_metrics_registry_exposes_all_ten_contract_metrics() -> None:
     metrics.observe_clickhouse_flush_duration(0.15)
     metrics.inc_clickhouse_errors("TimeoutError", 1)
     metrics.set_spillover_active(True)
+    metrics.set_jemalloc_allocated_bytes(30_000_000)
     metrics.set_jemalloc_resident_bytes(42_000_000)
 
     sample_names = {metric.name for metric in reg.collect()}
@@ -37,6 +38,7 @@ def test_metrics_registry_exposes_all_ten_contract_metrics() -> None:
         "trace_worker_provenance_resolution_ratio",
         "trace_worker_lru_hit_ratio",
         "trace_worker_clickhouse_flush_duration_seconds",
+        "trace_worker_jemalloc_allocated_bytes",
         "trace_worker_jemalloc_resident_bytes",
         "trace_worker_kafka_consumer_lag",
         "trace_worker_spillover_active",

@@ -94,6 +94,7 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra"
 markers = [
     "integration: live Docker/Testcontainers integration tests",
+    "soak: full-scale 8-hour multi-process throughput and memory soak validation",
 ]
 
 [tool.bandit]
