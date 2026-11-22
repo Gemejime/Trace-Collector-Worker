@@ -128,7 +128,7 @@ Assembled execution DAG and coordinate-enriched record schema for ClickHouse per
 ## 4. ClickHouse 24.3+ Analytical Sink Contract (`internal/storage/clickhouse/schemas.py`)
 
 - **Protocol**: Native TCP Protocol (`native_client.py` via `asynch` / `clickhouse-driver`), zero HTTP/single-insert operations.
-- **Two-Tier Micro-Batch Flush**: Flush strictly upon reaching **`50,000` records** OR **`2.0` seconds** (whichever occurs first). Fallback to `async_insert=1` only during extreme write bursts. Enable `insert_deduplicate=1` for safe at-least-once replay across WAL/Kafka restarts.
+- **Two-Tier Micro-Batch Flush**: Flush synchronously via native TCP strictly upon reaching **`50,000` records** OR **`2.0` seconds** (whichever occurs first); do not use `async_insert=1` unless a ClickHouse 24.3+ async deduplication (`async_insert_deduplicate=1`, `wait_for_async_insert=1`) and recovery contract is explicitly established. Enable `insert_deduplicate=1` and require WAL/restart recovery to preserve each block's exact contents, boundaries, and row order; `insert_deduplicate=1` alone does not suppress duplicates when replayed rows are regrouped into different batches, so downstream queries must also deduplicate by `(tenant_id, event_date, trace_id)`.
 - **Engine, Partitioning & Tables**:
   - **Primary Table (`rag_trace_dags`)**: `ReplicatedMergeTree`
   - **Partition By**: `toYYYYMM(event_date)`

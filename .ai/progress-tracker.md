@@ -16,7 +16,7 @@ This roadmap tracks the implementation milestones detailed in `tasks/RAG Trace C
 
 ## 2. Architecture Decision Records (ADRs)
 
-- **ADR-001: Partition Key Anchored Strictly to `trace_id`**: Mandates partitioning the `rag-diagnostic-traces` topic by `hash(trace_id)` rather than `tenant_id`, guaranteeing all spans for a query execution tree land on the same consumer worker process to enable deterministic in-memory DAG assembly.
+- **ADR-001: Partition Key Anchored Strictly to `trace_id`**: Mandates partitioning the `rag-diagnostic-traces` topic by `hash(trace_id)` rather than `tenant_id`, guaranteeing during normal (steady-state) partition ownership that all spans for a query execution tree land on the same consumer worker process for deterministic in-memory DAG assembly. On a consumer rebalance or worker restart, open DAG spans recover by keeping Kafka offsets uncommitted per partition while any DAG remains open in the time-wheel (advancing commits only through the highest contiguous offset confirmed durable by ClickHouse flush ACKs), allowing the new partition owner to replay from the earliest uncommitted offset. This recovery contract must be established before Phase 2 time-wheel implementation begins.
 - **ADR-002: Multi-Process Execution Architecture**: Adopts a multi-process supervisor model per pod (`3–4` processes) over single-threaded `asyncio`, enabling horizontal core saturation (`2,000m–4,000m` CPU) and delivering $\ge 12,000\text{ spans/sec}$ without GIL bottlenecks.
 - **ADR-003: Decoupled Evaluation Triggering**: Prunes direct Temporal workflow dispatching from the trace collector. The worker writes normalized execution records to ClickHouse, allowing downstream evaluation services (`rag-eval-worker`) to query and batch golden datasets offline without external gRPC dependencies.
 - **ADR-004: Bucketed Time-Wheel DAG Aggregation**: Replaces per-trace timer objects with a low-overhead bucketed time-wheel ring buffer, bounding memory overhead during high-volume trace span correlation.
@@ -30,7 +30,7 @@ This roadmap tracks the implementation milestones detailed in `tasks/RAG Trace C
 1. Query Prometheus metric `trace_worker_kafka_consumer_lag` grouped by `partition`.
 2. Check ClickHouse write duration via `trace_worker_clickhouse_flush_duration_seconds`.
 3. If ClickHouse write latency is normal, verify if KEDA has scaled pod replicas up to the maximum threshold (`16`).
-4. If scaling is capped, increase `maxReplicas` in Helm values or add partitions to the `rag-diagnostic-traces` Kafka topic if partition count (`32`) is saturated.
+4. If scaling is capped, increase `maxReplicas` in Helm values (up to the 32-partition consumer limit). Do not expand `rag-diagnostic-traces` partitions live as an immediate response to saturation; increasing partition count requires a coordinated drain or migration procedure that preserves `hash(trace_id)` trace ownership for open DAGs before switching partition counts.
 
 ### Runbook 2: Diagnosing Elevated DAG Assembly Timeouts
 1. Inspect `trace_worker_dag_evictions_total{status="partial"}`.
@@ -40,7 +40,7 @@ This roadmap tracks the implementation milestones detailed in `tasks/RAG Trace C
 ### Runbook 3: ClickHouse Backpressure & WAL Spooling
 1. Check `trace_worker_spillover_active` and `trace_worker_clickhouse_errors_total`.
 2. If workers are spooling to local disk, check ClickHouse system tables (`system.parts`) for active merge pressure or disk saturation.
-3. Temporarily enable `async_insert=1` in the worker connection settings to shift micro-batch buffering directly onto ClickHouse server memory.
+3. Retain synchronous native TCP inserts and allow `disk_wal.py` plus consumer backpressure to absorb the stall. Do not enable `async_insert=1` unless ClickHouse 24.3+ async deduplication (`async_insert_deduplicate=1`) is configured and `wait_for_async_insert=1` is set so acknowledgment follows the flush.
 
 ---
 

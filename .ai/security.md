@@ -3,7 +3,7 @@
 ## Threat Model & Trust Boundaries
 
 - **Untrusted / Malformed Stream Payloads**: Protobuf diagnostic spans arrive from Kafka topic `rag-diagnostic-traces`. Deserialization must enforce payload size bounds, schema validation, and coordinate bounds clamping (`[0.0, 1.0]`) so malformed or adversarial messages cannot trigger OOMs or crash worker subprocesses.
-- **Tenant Isolation**: Every trace span, assembled DAG, and ClickHouse record carries `tenant_id`. ClickHouse `ReplicatedMergeTree` tables are ordered by `(tenant_id, event_date, trace_id)` to enforce logical tenant partitioning for downstream `rag-eval-worker` queries.
+- **Tenant Isolation**: Every trace span, assembled DAG, and ClickHouse record carries `tenant_id`. Table ordering by `(tenant_id, event_date, trace_id)` and `tenant_id` column presence are storage optimizations, not authorization controls. Shared-table reads by downstream `rag-eval-worker` / query clients must be restricted by a trusted authorization control—specifically ClickHouse Row Policies (`CREATE ROW POLICY ... ON rag_trace_dags USING tenant_id = ...`) bound to authenticated per-tenant ClickHouse roles/users or server-enforced, non-overridable session/query settings so callers can read only their authorized `tenant_id`.
 - **Local Disk WAL Protection**: During ClickHouse outages, `disk_wal.py` spools micro-batches to an isolated ephemeral/encrypted volume mount with strict size caps so disk saturation cannot starve the node.
 - **Worker Runtime Hardening**: Container runs as non-root with `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so`, read-only root filesystem (writable mount restricted solely to the WAL spillover directory), and all Linux capabilities dropped.
 

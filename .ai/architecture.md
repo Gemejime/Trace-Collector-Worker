@@ -34,8 +34,9 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
   - Strict Protobuf schema validation on deserialization; `coordinate_mapper.py` clamps and normalizes bounding box coordinates to unit floats $[0.0, 1.0]$; corrupt/unparseable messages are counted, logged safely (without raw payloads), and quarantined/skipped without crashing sibling workers.
 - **Rate Limiting & Backpressure**:
   - Consumer poll backpressure tied to ClickHouse batch buffer depth and disk WAL high-water marks; pauses Kafka partition consumption rather than exhausting pod RSS beyond $2.0\text{ GiB}$.
-- **Idempotency**:
-  - Kafka offsets are committed **if and only after** ClickHouse confirms micro-batch disk persistence (`offset_manager.py`). ClickHouse `ReplicatedMergeTree` schema ordering `(tenant_id, event_date, trace_id)` and deterministic `trace_id`/`span_id` keys ensure safe at-least-once replay without corrupting downstream evaluation queries.
+- **Idempotency & Contiguous Offset Durability**:
+  - `offset_manager.py` enforces **contiguous durability independently per partition**: it tracks pending offsets per partition and advances Kafka commits **only** through the highest consecutive offset confirmed durable by ClickHouse flush ACKs, stopping strictly before the earliest unresolved or unflushed offset (a later offset's flush ACK never permits committing past an earlier unresolved record, such as an open DAG in the time-wheel).
+  - Duplicate rows are identified by deterministic row identity `(tenant_id, event_date, trace_id)`. Neither the `ReplicatedMergeTree` sorting key `(tenant_id, event_date, trace_id)` nor block-level `insert_deduplicate=1` deduplicates rows when a replay regroups rows into different insert batches. Therefore, at-least-once replay safety relies on row-/query-level deduplication (e.g., `ReplacingMergeTree` with a monotonic version/timestamp or deterministic query-time `GROUP BY (tenant_id, event_date, trace_id)` / `LIMIT 1 BY tenant_id, event_date, trace_id` / `FINAL`). Downstream materialized views (`rag_eval_candidates_mv`) must target a deduplicating table or be queried with the same `(tenant_id, event_date, trace_id)` deduplication by `rag-eval-worker` so replayed inserts do not trigger duplicate evaluation runs.
 
 ### Layer 2: Data Persistence & State
 - **Database Migrations & Schemas (`internal/storage/clickhouse/schemas.py`)**:
@@ -71,9 +72,9 @@ Aligned with `tasks/Production Grade Backend Concepts.pdf`:
 - **Data Protection & Secured Logging**:
   - TLS in transit; structured JSON logging with strict redaction of credentials, DSNs, raw chunk text, and PII/PHI.
 - **Container Hardening**:
-  - Multi-stage `Dockerfile` running as non-root user with `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so`, `readOnlyRootFilesystem: true` (with dedicated writable mounts only for `/var/spool/trace-wal` and `/tmp/prom-multiproc`), and dropped Linux capabilities.
+  - Multi-stage `Dockerfile` running as non-root user with architecture-matched `jemalloc` preloading (`/usr/lib/x86_64-linux-gnu/libjemalloc.so` for `amd64` / `c6i.xlarge` and `/usr/lib/aarch64-linux-gnu/libjemalloc.so` for `arm64` / `c7g.xlarge`, e.g., selected via `TARGETARCH` during image build), `readOnlyRootFilesystem: true` (with dedicated writable mounts only for `/var/spool/trace-wal` and `/tmp/prom-multiproc`), and dropped Linux capabilities.
 - **Per-Process Memory Budget**:
-  - With 3–4 subprocesses per pod, each subprocess targets $\le 450\text{ MiB}$ RSS (50k LRU + time-wheel + 50k batch buffer) so aggregate pod RSS (`sum(trace_worker_jemalloc_resident_bytes)`) remains strictly $\le 2.0\text{ GiB}$.
+  - With 3–4 subprocesses per pod, each subprocess targets $\le 450\text{ MiB}$ RSS (50k LRU + time-wheel + 50k batch buffer) so total pod/container working-set memory (including the supervisor process and all worker subprocesses, measured via container cgroup / `container_memory_working_set_bytes`) remains strictly $\le 2.0\text{ GiB}$. `trace_worker_jemalloc_resident_bytes` is retained as a per-worker allocator diagnostic, not as the pod memory ceiling measurement.
 
 ### Layer 5: Observability & Quality
 - **Structured Logging**: JSON logs with `trace_id`, `span_id`, `tenant_id`, `worker_pid`, `partition`, `stage`, and `duration_ms`.
