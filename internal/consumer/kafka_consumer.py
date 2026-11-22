@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ssl
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -22,6 +23,7 @@ from internal.consumer.offset_manager import OffsetManager
 from internal.telemetry.logger import get_logger
 
 SpanHandler = Callable[[TopicPartition, int, TraceSpanRecord], Awaitable[None]]
+RevocationHook = Callable[[Iterable[TopicPartition]], Awaitable[None] | None]
 
 
 def _build_ssl_context(settings: WorkerSettings) -> ssl.SSLContext | None:
@@ -65,11 +67,13 @@ class KafkaSpanConsumer:
         offset_manager: OffsetManager,
         span_handler: SpanHandler | None = None,
         consumer: AIOKafkaConsumer | None = None,
+        on_revoked_hook: RevocationHook | None = None,
     ) -> None:
         self._settings = settings
         self._offset_manager = offset_manager
         self._span_handler = span_handler
         self._consumer = consumer
+        self._on_revoked_hook = on_revoked_hook
         self._owns_consumer = consumer is None
         self._logger = get_logger("kafka_consumer", stage="ingress")
         self._paused = False
@@ -156,8 +160,12 @@ class KafkaSpanConsumer:
         )
 
     async def handle_partitions_revoked(self, revoked: Iterable[TopicPartition]) -> None:
-        """Commit contiguous durable offsets for revoked partitions before releasing them."""
+        """Drop open DAG state and commit contiguous durable offsets for revoked partitions."""
         revoked_list = list(revoked)
+        if self._on_revoked_hook is not None:
+            hook_result = self._on_revoked_hook(revoked_list)
+            if inspect.isawaitable(hook_result):
+                await hook_result
         final_commits = self._offset_manager.on_partitions_revoked(revoked_list)
         if final_commits and self._consumer is not None:
             try:

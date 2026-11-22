@@ -59,6 +59,8 @@ class WorkerSettings(BaseSettings):
     redis_tls_enabled: bool = Field(default=False)
     redis_ssl_cafile: str | None = Field(default=None)
     redis_lru_capacity: int = Field(default=50_000, ge=100, le=1_000_000)
+    redis_socket_timeout_seconds: float = Field(default=0.5, gt=0.0, le=30.0)
+    redis_pipeline_batch_size: int = Field(default=256, ge=1, le=10_000)
 
     # ClickHouse 24.3+ native TCP sink
     clickhouse_host: str = Field(default="localhost", min_length=1)
@@ -71,6 +73,8 @@ class WorkerSettings(BaseSettings):
 
     # Time-wheel, micro-batching & local disk WAL
     timewheel_expiry_seconds: float = Field(default=1.5, gt=0.0, le=60.0)
+    timewheel_tick_ms: int = Field(default=50, ge=10, le=1_000)
+    timewheel_max_open_traces: int = Field(default=25_000, ge=100, le=500_000)
     batch_max_rows: int = Field(default=50_000, ge=1, le=500_000)
     batch_flush_interval_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
     disk_wal_dir: str = Field(default="/var/spool/trace-wal", min_length=1)
@@ -113,5 +117,8 @@ class WorkerSettings(BaseSettings):
             raise ValueError(
                 "worker_heartbeat_timeout_seconds must be > worker_heartbeat_interval_seconds"
             )
+
+        if self.timewheel_expiry_seconds * 1000.0 < self.timewheel_tick_ms:
+            raise ValueError("timewheel_expiry_seconds * 1000 must be >= timewheel_tick_ms")
 
         return self

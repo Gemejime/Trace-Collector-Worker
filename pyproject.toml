@@ -11,9 +11,11 @@ requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 dependencies = [
     "aiokafka>=0.11.0,<1.0",
+    "msgpack>=1.1.0,<2.0",
     "protobuf>=5.28.0,<8.0",
     "pydantic>=2.9.0,<3.0",
     "pydantic-settings>=2.6.0,<3.0",
+    "redis>=5.2.0,<6.0",
     "structlog>=24.4.0,<26.0",
     "uvloop>=0.21.0,<1.0; sys_platform != 'win32'",
 ]
@@ -69,7 +71,7 @@ mypy_path = "."
 packages = ["cmd", "internal"]
 
 [[tool.mypy.overrides]]
-module = ["uvloop", "uvloop.*", "aiokafka", "aiokafka.*"]
+module = ["uvloop", "uvloop.*", "aiokafka", "aiokafka.*", "msgpack", "msgpack.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
