@@ -120,7 +120,7 @@ Assembled execution DAG and coordinate-enriched record schema for ClickHouse per
 - **L1 Cache**: Process-local thread-safe LRU holding `50,000` hot chunk coordinate hashes (`<0.05ms` hit latency).
 - **L2 Cache (Redis 7.2 Cluster)**:
   - **Key Format**: `{doc_id}:{chunk_id}` *(Redis Cluster hash tag on `{doc_id}` enables slot-grouped multi-node pipelined `MGET` fetches)*
-  - **Value Encoding**: MsgPack-serialized provenance record (with JSON fallback in tests) containing `doc_version` (`uint32`), `parent_container_hash` (`string`), `page_index` (`uint32`), and raw bounding box `[x1, y1, x2, y2]` normalized by `coordinate_mapper.py` to `[0.0, 1.0]`.
+  - **Value Encoding**: MsgPack-serialized provenance record (with JSON fallback in tests) containing `doc_version` (`uint32`), `parent_container_hash` (`string`), `page_index` (`uint32`), `bbox` (`[x1, y1, x2, y2]`), and optional `page_width` / `page_height` (`float`) normalized by `coordinate_mapper.py` to `[0.0, 1.0]`. Missing keys fall back to default provenance (`doc_version=0`, `parent_container_hash=""`, `page_index=0`, `bbox=(0.0, 0.0, 0.0, 0.0)`) and record a resolution miss.
   - **Target Latency**: $<1.5\text{ ms}$ aggregate per pipelined batch.
 
 ---

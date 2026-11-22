@@ -20,6 +20,10 @@ def test_settings_defaults_and_env_override(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert settings.worker_process_count == 3
     assert settings.timewheel_expiry_seconds == 1.5
+    assert settings.timewheel_tick_ms == 50
+    assert settings.timewheel_max_open_traces == 25_000
+    assert settings.redis_socket_timeout_seconds == 0.5
+    assert settings.redis_pipeline_batch_size == 256
     assert settings.kafka_topic_partitions == 32
     assert settings.batch_max_rows == 50_000
     assert settings.batch_flush_interval_seconds == 2.0
@@ -61,4 +65,10 @@ def test_settings_fetch_memory_and_timeout_bounds() -> None:
         WorkerSettings(
             worker_heartbeat_interval_seconds=5.0,
             worker_heartbeat_timeout_seconds=5.0,
+        )
+
+    with pytest.raises(ValidationError, match="timewheel_expiry_seconds"):
+        WorkerSettings(
+            timewheel_expiry_seconds=0.01,
+            timewheel_tick_ms=50,
         )
