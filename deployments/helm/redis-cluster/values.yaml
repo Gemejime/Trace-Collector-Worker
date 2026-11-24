@@ -1,0 +1,46 @@
+# Bitnami Redis 7.2 Cluster Helm Values for rag-trace-collector-worker
+# Chart: bitnami/redis-cluster (v11.x)
+# Namespace: rag-telemetry
+# Release: rag-trace-collector-worker-redis
+
+global:
+  redis:
+    existingSecret: "rag-trace-collector-worker-secret"
+    existingSecretPasswordKey: "REDIS_PASSWORD"
+
+usePassword: true
+
+cluster:
+  init: true
+  nodes: 6
+  replicas: 1
+
+redis:
+  podAntiAffinityPreset: soft
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  configmap: |-
+    appendonly yes
+    appendfsync everysec
+    save 900 1
+    save 300 10
+    save 60 10000
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+metrics:
+  enabled: true
+  service:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9121"
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9121"
