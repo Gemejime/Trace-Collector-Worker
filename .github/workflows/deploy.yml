@@ -15,7 +15,7 @@ on:
         description: "Kubernetes namespace"
         required: true
         type: string
-        default: "rag-platform"
+        default: "rag-telemetry"
       image_tag:
         description: "Container image tag override (optional)"
         required: false
@@ -57,7 +57,7 @@ jobs:
       - name: Apply Kubernetes Secret idempotently
         env:
           NAMESPACE: ${{ inputs.namespace }}
-          SECRET_NAME: "rag-trace-collector-worker-secrets"
+          SECRET_NAME: "rag-trace-collector-worker-secret"
           KAFKA_SASL_USERNAME: ${{ secrets.KAFKA_SASL_USERNAME }}
           KAFKA_SASL_PASSWORD: ${{ secrets.KAFKA_SASL_PASSWORD }}
           KAFKA_SSL_KEY_PASSWORD: ${{ secrets.KAFKA_SSL_KEY_PASSWORD }}
@@ -137,7 +137,7 @@ jobs:
           helm upgrade --install rag-trace-worker deployments/helm \
             --namespace "$NAMESPACE" \
             --create-namespace \
-            --set env.secretName=rag-trace-collector-worker-secrets \
+            --set env.secretName=rag-trace-collector-worker-secret \
             $EXTRA_ARGS \
             --wait \
             --timeout 5m

@@ -92,7 +92,7 @@ kafka:
   secretName: ""
 
 redis:
-  clusterNodes: "redis-cluster.redis.svc.cluster.local:6379"
+  clusterNodes: "rag-trace-collector-worker-redis-0.rag-trace-collector-worker-redis-headless.rag-telemetry.svc.cluster.local:6379,rag-trace-collector-worker-redis-1.rag-trace-collector-worker-redis-headless.rag-telemetry.svc.cluster.local:6379,rag-trace-collector-worker-redis-2.rag-trace-collector-worker-redis-headless.rag-telemetry.svc.cluster.local:6379"
   tlsEnabled: true
   lruCapacity: 50000
   socketTimeoutSeconds: 0.5
@@ -186,7 +186,7 @@ rollout:
                 podTemplateHashValue: Latest
 
 env:
-  secretName: ""
+  secretName: "rag-trace-collector-worker-secret"
   WORKER_PROCESS_COUNT: "4"
   GRACEFUL_DRAIN_TIMEOUT_SECONDS: "20.0"
   WORKER_HEARTBEAT_INTERVAL_SECONDS: "2.0"
@@ -210,7 +210,7 @@ env:
   KAFKA_MAX_PARTITION_FETCH_BYTES: "1048576"
   KAFKA_MAX_IN_FLIGHT_OFFSETS: "10000"
   KAFKA_OFFSET_COMMIT_INTERVAL_SECONDS: "1.0"
-  REDIS_CLUSTER_NODES: "localhost:6379"
+  REDIS_CLUSTER_NODES: "rag-trace-collector-worker-redis-0.rag-trace-collector-worker-redis-headless.rag-telemetry.svc.cluster.local:6379,rag-trace-collector-worker-redis-1.rag-trace-collector-worker-redis-headless.rag-telemetry.svc.cluster.local:6379,rag-trace-collector-worker-redis-2.rag-trace-collector-worker-redis-headless.rag-telemetry.svc.cluster.local:6379"
   REDIS_TLS_ENABLED: "false"
   REDIS_LRU_CAPACITY: "50000"
   REDIS_SOCKET_TIMEOUT_SECONDS: "0.5"

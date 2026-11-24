@@ -37,8 +37,8 @@ The worker's `WorkerSettings` (`internal/config/settings.py`) expects the follow
 The Helm chart (`deployments/helm/`) supports two secret injection patterns in `templates/deployment.yaml` and `templates/rollout.yaml`:
 
 ### Option A: Unified Secret (`env.secretName`) — *Default for CI/CD*
-1. Create a single Kubernetes Secret (e.g., `rag-trace-collector-worker-secrets`) containing any needed keys (`KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD`, `REDIS_PASSWORD`, `CLICKHOUSE_PASSWORD`, etc.).
-2. Set `env.secretName: "rag-trace-collector-worker-secrets"` in `deployments/helm/values.yaml` (preserved across `--sync` runs) or pass `--set env.secretName=rag-trace-collector-worker-secrets`.
+1. Create a single Kubernetes Secret (e.g., `rag-trace-collector-worker-secret`) containing any needed keys (`KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD`, `REDIS_PASSWORD`, `CLICKHOUSE_PASSWORD`, etc.).
+2. Set `env.secretName: "rag-trace-collector-worker-secret"` in `deployments/helm/values.yaml` (preserved across `--sync` runs) or pass `--set env.secretName=rag-trace-collector-worker-secret`.
 3. `deployment.yaml` and `rollout.yaml` mount it via `envFrom.secretRef`.
 
 ### Option B: Per-Service Secrets (`kafka.secretName`, `redis.secretName`, `clickhouse.secretName`)
@@ -68,7 +68,7 @@ Rendered via `rag-trace-collector-worker.secretEnv` in `deployments/helm/templat
    - Runs `kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -`.
    - Deletes temporary credential files in `if: always()`.
 3. **Helm Deployment (`deploy-helm` job)**:
-   - Runs `helm upgrade --install` with `--set env.secretName=rag-trace-collector-worker-secrets`.
+   - Runs `helm upgrade --install` with `--set env.secretName=rag-trace-collector-worker-secret`.
 
 ---
 
