@@ -49,6 +49,17 @@ def test_settings_sasl_requires_credentials() -> None:
     assert settings.kafka_sasl_mechanism == "SCRAM-SHA-512"
     assert "my-sasl-password" not in repr(settings)
 
+    confluent_settings = WorkerSettings(
+        kafka_bootstrap_servers="pkc-xxxxx.us-east-1.aws.confluent.cloud:9092",
+        kafka_security_protocol="SASL_SSL",
+        kafka_sasl_mechanism="PLAIN",
+        kafka_sasl_username="CONFLUENT_API_KEY",
+        kafka_sasl_password="confluent-api-secret",
+        kafka_session_timeout_ms=45_000,
+    )
+    assert confluent_settings.kafka_sasl_mechanism == "PLAIN"
+    assert "confluent-api-secret" not in repr(confluent_settings)
+
 
 def test_settings_fetch_memory_and_timeout_bounds() -> None:
     with pytest.raises(ValidationError, match="kafka_fetch_max_bytes"):
