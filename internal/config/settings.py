@@ -39,7 +39,9 @@ class WorkerSettings(BaseSettings):
     kafka_security_protocol: Literal["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] = Field(
         default="PLAINTEXT"
     )
-    kafka_sasl_mechanism: Literal["SCRAM-SHA-256", "SCRAM-SHA-512"] | None = Field(default=None)
+    kafka_sasl_mechanism: Literal["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"] | None = Field(
+        default=None
+    )
     kafka_sasl_username: str | None = Field(default=None)
     kafka_sasl_password: SecretStr | None = Field(default=None)
     kafka_ssl_cafile: str | None = Field(default=None)
