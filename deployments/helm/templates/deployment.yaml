@@ -15,6 +15,7 @@ spec:
   template:
     metadata:
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- toYaml .Values.podAnnotations | nindent 8 }}
       labels:
         {{- include "rag-trace-collector-worker.selectorLabels" . | nindent 8 }}
@@ -40,8 +41,18 @@ spec:
             - name: telemetry
               containerPort: {{ .Values.worker.telemetryPort }}
               protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "rag-trace-collector-worker.fullname" . }}
+            {{- if and .Values.env .Values.env.secretName }}
+            - secretRef:
+                name: {{ .Values.env.secretName }}
+            {{- end }}
+          {{- $secretEnv := include "rag-trace-collector-worker.secretEnv" . }}
+          {{- if $secretEnv }}
           env:
-            {{- include "rag-trace-collector-worker.env" . | nindent 12 }}
+            {{- $secretEnv | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:

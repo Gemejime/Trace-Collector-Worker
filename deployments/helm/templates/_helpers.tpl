@@ -41,6 +41,35 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{- define "rag-trace-collector-worker.secretEnv" -}}
+{{- if .Values.kafka.secretName }}
+- name: KAFKA_SASL_USERNAME
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.kafka.secretName | quote }}
+      key: username
+- name: KAFKA_SASL_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.kafka.secretName | quote }}
+      key: password
+{{- end }}
+{{- if .Values.redis.secretName }}
+- name: REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.redis.secretName | quote }}
+      key: password
+{{- end }}
+{{- if .Values.clickhouse.secretName }}
+- name: CLICKHOUSE_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.clickhouse.secretName | quote }}
+      key: password
+{{- end }}
+{{- end }}
+
 {{- define "rag-trace-collector-worker.env" -}}
 - name: WORKER_PROCESS_COUNT
   value: {{ .Values.worker.processCount | quote }}
