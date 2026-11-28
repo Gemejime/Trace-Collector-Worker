@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package rag.trace.v1;
+
+// Normalized visual bounding box coordinates clamped to unit floats [0.0, 1.0].
+message BoundingBox {
+  double x1 = 1;
+  double y1 = 2;
+  double x2 = 3;
+  double y2 = 4;
+}
+
+// EnrichedTraceNode pairs chunk provenance metadata with rank transition deltas.
+message EnrichedTraceNode {
+  string chunk_id = 1;
+  uint32 doc_id = 2;
+  uint32 doc_version = 3;
+  string parent_container_hash = 4;
+  uint32 page_index = 5;
+  BoundingBox bbox = 6;
+  int32 dense_rank = 7;
+  int32 sparse_rank = 8;
+  int32 rrf_rank = 9;
+  int32 rerank_rank = 10;
+  int32 dense_to_rrf_delta = 11;
+  int32 rrf_to_rerank_delta = 12;
+  int32 dense_to_rerank_delta = 13;
+  double score = 14;
+  double logit = 15;
+}
+
+// ProvenanceGraph is the assembled execution DAG persisted to ClickHouse.
+message ProvenanceGraph {
+  string trace_id = 1;
+  string tenant_id = 2;
+  string event_date = 3;
+  bool is_partial = 4;
+  double total_duration_ms = 5;
+  repeated EnrichedTraceNode nodes = 6;
+  map<string, string> eval_tags = 7;
+}

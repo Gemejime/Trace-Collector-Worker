@@ -1,0 +1,159 @@
+name: Deploy - rag-trace-collector-worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target deployment environment"
+        required: true
+        type: choice
+        default: "staging"
+        options:
+          - staging
+          - production
+      namespace:
+        description: "Kubernetes namespace"
+        required: true
+        type: string
+        default: "rag-telemetry"
+      image_tag:
+        description: "Container image tag override (optional)"
+        required: false
+        type: string
+        default: ""
+      create_namespace:
+        description: "Create Kubernetes namespace if it does not exist"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-${{ inputs.environment }}-${{ inputs.namespace }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inject-secrets:
+    name: Inject Kubernetes Secrets (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          set +x
+          if [ -z "$KUBECONFIG_B64" ]; then
+            echo "::error::KUBECONFIG_B64 secret is not set for environment ${{ inputs.environment }}."
+            exit 1
+          fi
+          printf '%s' "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Apply Kubernetes Secret idempotently
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          CREATE_NAMESPACE: ${{ inputs.create_namespace }}
+          SECRET_NAME: "rag-trace-collector-worker-secret"
+          KAFKA_SASL_USERNAME: ${{ secrets.KAFKA_SASL_USERNAME }}
+          KAFKA_SASL_PASSWORD: ${{ secrets.KAFKA_SASL_PASSWORD }}
+          KAFKA_SSL_KEY_PASSWORD: ${{ secrets.KAFKA_SSL_KEY_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+        run: |
+          set +x
+          if [ "$CREATE_NAMESPACE" = "true" ]; then
+            kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || kubectl create namespace "$NAMESPACE"
+          fi
+
+          ENV_FILE="$RUNNER_TEMP/worker-secrets.env"
+          : > "$ENV_FILE"
+          chmod 600 "$ENV_FILE"
+
+          for var_name in \
+            KAFKA_SASL_USERNAME \
+            KAFKA_SASL_PASSWORD \
+            KAFKA_SSL_KEY_PASSWORD \
+            REDIS_PASSWORD \
+            CLICKHOUSE_PASSWORD; do
+            val="${!var_name:-}"
+            if [ -n "$val" ]; then
+              printf '%s=%s\n' "$var_name" "$val" >> "$ENV_FILE"
+            fi
+          done
+
+          if [ ! -s "$ENV_FILE" ]; then
+            echo "::warning::No secret values provided in GitHub Environment '${{ inputs.environment }}'; skipping Secret apply."
+            exit 0
+          fi
+
+          kubectl create secret generic "$SECRET_NAME" \
+            --namespace "$NAMESPACE" \
+            --from-env-file="$ENV_FILE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Applied Kubernetes Secret '$SECRET_NAME' in namespace '$NAMESPACE'."
+
+      - name: Clean up temporary credential files
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/kubeconfig" "$RUNNER_TEMP/worker-secrets.env"
+
+  deploy-helm:
+    name: Helm Deploy (${{ inputs.environment }})
+    needs: inject-secrets
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm & kubectl
+        uses: azure/setup-helm@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          set +x
+          printf '%s' "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Helm upgrade --install
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
+          CREATE_NAMESPACE: ${{ inputs.create_namespace }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          EXTRA_ARGS=""
+          if [ "$CREATE_NAMESPACE" = "true" ]; then
+            EXTRA_ARGS="--create-namespace"
+          fi
+          if [ -n "$IMAGE_TAG" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --set image.tag=$IMAGE_TAG"
+          fi
+
+          helm upgrade --install rag-trace-worker deployments/helm \
+            --namespace "$NAMESPACE" \
+            --set env.secretName=rag-trace-collector-worker-secret \
+            $EXTRA_ARGS \
+            --wait \
+            --timeout 5m
+
+      - name: Clean up temporary kubeconfig
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/kubeconfig"

@@ -1,0 +1,67 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "rag-trace-collector-worker.fullname" . }}
+  labels:
+    {{- include "rag-trace-collector-worker.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: rag-trace-collector-worker.rules
+      rules:
+        - alert: TraceWorkerElevatedConsumerPartitionLag
+          expr: sum(trace_worker_kafka_consumer_lag) > 50000
+          for: 3m
+          labels:
+            severity: warning
+            service: rag-trace-collector-worker
+          annotations:
+            summary: "Elevated Kafka consumer lag on rag-diagnostic-traces"
+            description: "Total consumer group lag has exceeded 50,000 records for over 3 minutes."
+
+        - alert: TraceWorkerCacheResolutionSLOBreach
+          expr: min by (namespace, pod) (avg_over_time(trace_worker_provenance_resolution_ratio[5m])) < 0.999
+          for: 5m
+          labels:
+            severity: warning
+            service: rag-trace-collector-worker
+          annotations:
+            summary: "Provenance resolution ratio fell below 99.9% SLO"
+            description: "Pod {{`{{$labels.namespace}}`}}/{{`{{$labels.pod}}`}} provenance resolution ratio is below 0.999 over 5m."
+
+        - alert: TraceWorkerCacheResolutionCritical
+          expr: min by (namespace, pod) (avg_over_time(trace_worker_provenance_resolution_ratio[5m])) < 0.95
+          for: 2m
+          labels:
+            severity: critical
+            service: rag-trace-collector-worker
+          annotations:
+            summary: "Critical provenance resolution degradation (< 95%)"
+            description: "Pod {{`{{$labels.namespace}}`}}/{{`{{$labels.pod}}`}} provenance resolution ratio dropped below 0.95."
+
+        - alert: TraceWorkerClickHouseNativeIngestionError
+          expr: sum(rate(trace_worker_clickhouse_errors_total[2m])) > 0
+          for: 1m
+          labels:
+            severity: page
+            service: rag-trace-collector-worker
+          annotations:
+            summary: "ClickHouse native TCP ingestion errors detected"
+            description: "Worker pods are encountering ClickHouse write/connection errors and may be spooling to disk WAL."
+
+        - alert: TraceWorkerNativeMemoryFragmentationBreach
+          expr: |
+            sum by (namespace, pod) (trace_worker_jemalloc_resident_bytes) > 0.85 * 2684354560
+            or
+            sum by (namespace, pod) (container_memory_working_set_bytes{container="worker"}) > 0.85 * 2684354560
+          for: 2m
+          labels:
+            severity: critical
+            service: rag-trace-collector-worker
+          annotations:
+            summary: "Worker pod memory exceeded 85% of 2.5 GiB container limit"
+            description: "Pod {{`{{$labels.namespace}}`}}/{{`{{$labels.pod}}`}} jemalloc resident or cAdvisor working set exceeded 85% of 2.5 GiB."
+{{- end }}

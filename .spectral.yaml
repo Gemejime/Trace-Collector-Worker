@@ -1,0 +1,7 @@
+extends: ["spectral:oas"]
+rules:
+  oas3-api-servers: "error"
+  oas3-valid-schema-example: "warn"
+  operation-operationId: "error"
+  operation-description: "warn"
+  info-contact: "off"

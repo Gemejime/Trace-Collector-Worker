@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rag-trace-collector-worker
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Gemejime/Trace-Collector-Worker.git
+    targetRevision: main
+    path: deployments/helm
+    helm:
+      valueFiles:
+        - values.yaml
+      parameters:
+        - name: rollout.enabled
+          value: "true"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rag-telemetry
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

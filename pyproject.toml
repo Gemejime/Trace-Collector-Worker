@@ -1,0 +1,103 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-trace-collector-worker"
+version = "0.1.0"
+description = "Asynchronous multi-process Kafka-to-ClickHouse RAG trace DAG assembly worker"
+readme = ".ai/project-overview.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "aiokafka>=0.11.0,<1.0",
+    "aiohttp>=3.11.0,<4.0",
+    "clickhouse-driver>=0.2.9,<1.0",
+    "msgpack>=1.1.0,<2.0",
+    "prometheus-client>=0.21.0,<1.0",
+    "protobuf>=7.35.1,<8.0",
+    "pydantic>=2.9.0,<3.0",
+    "pydantic-settings>=2.6.0,<3.0",
+    "redis>=5.2.0,<6.0",
+    "structlog>=24.4.0,<26.0",
+    "uvloop>=0.21.0,<1.0; sys_platform != 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "bandit>=1.7.10",
+    "grpcio-tools>=1.68.0",
+    "mypy>=1.13.0",
+    "mypy-protobuf>=3.6.0",
+    "openapi-spec-validator>=0.7.1",
+    "pip-audit>=2.7.3",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "pyyaml>=6.0.2",
+    "ruff>=0.8.0",
+    "types-protobuf>=5.28.0",
+]
+
+[project.scripts]
+rag-trace-worker = "cmd.worker.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cmd*", "internal*", "api*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = [
+    ".venv",
+    "api/proto/v1/*_pb2.py",
+    "api/proto/v1/*_pb2.pyi",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC", "S"]
+ignore = [
+    "S101",  # assert allowed in tests and internal invariants
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test/**" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+warn_return_any = true
+disallow_untyped_defs = true
+mypy_path = "."
+packages = ["cmd", "internal"]
+
+[[tool.mypy.overrides]]
+module = [
+    "uvloop",
+    "uvloop.*",
+    "aiokafka",
+    "aiokafka.*",
+    "msgpack",
+    "msgpack.*",
+    "clickhouse_driver",
+    "clickhouse_driver.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra"
+markers = [
+    "integration: live Docker/Testcontainers integration tests",
+    "soak: full-scale 8-hour multi-process throughput and memory soak validation",
+]
+
+[tool.bandit]
+targets = ["cmd", "internal"]
+exclude_dirs = ["test", ".venv"]
+skips = ["B101"]

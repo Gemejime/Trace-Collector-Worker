@@ -1,0 +1,22 @@
+services:
+  redis:
+    image: bitnami/redis:7.2-debian-12
+    container_name: rag-trace-collector-worker-redis-local
+    ports:
+      - "6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-local-dev-redis-password}
+      REDIS_AOF_ENABLED: "yes"
+    volumes:
+      - redis_data:/bitnami/redis/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+    driver: local

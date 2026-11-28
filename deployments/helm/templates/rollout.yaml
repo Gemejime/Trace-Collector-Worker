@@ -1,0 +1,147 @@
+{{- if .Values.rollout.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "rag-trace-collector-worker.fullname" . }}
+  labels:
+    {{- include "rag-trace-collector-worker.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.keda.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "rag-trace-collector-worker.selectorLabels" . | nindent 6 }}
+  strategy:
+    canary:
+      canaryService: {{ include "rag-trace-collector-worker.fullname" . }}
+      steps:
+        {{- tpl (toYaml .Values.rollout.canary.steps) . | nindent 8 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+      labels:
+        {{- include "rag-trace-collector-worker.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "rag-trace-collector-worker.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: telemetry
+              containerPort: {{ include "rag-trace-collector-worker.telemetryPort" . }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "rag-trace-collector-worker.fullname" . }}
+            {{- if and .Values.env .Values.env.secretName }}
+            - secretRef:
+                name: {{ .Values.env.secretName }}
+            {{- end }}
+          {{- $secretEnv := include "rag-trace-collector-worker.secretEnv" . }}
+          {{- if $secretEnv }}
+          env:
+            {{- $secretEnv | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: telemetry
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: telemetry
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          volumeMounts:
+            - name: trace-wal
+              mountPath: {{ include "rag-trace-collector-worker.diskWalDir" . }}
+            - name: prom-multiproc
+              mountPath: {{ include "rag-trace-collector-worker.prometheusMultiprocDir" . }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: trace-wal
+          emptyDir:
+            sizeLimit: {{ .Values.walVolume.sizeLimit }}
+        - name: prom-multiproc
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ include "rag-trace-collector-worker.fullname" . }}-canary
+  labels:
+    {{- include "rag-trace-collector-worker.labels" . | nindent 4 }}
+spec:
+  args:
+    - name: canary-hash
+  metrics:
+    - name: canary-telemetry-presence
+      interval: 30s
+      count: 4
+      successCondition: "result[0] > 0"
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: {{ .Values.rollout.prometheusAddress | quote }}
+          query: |
+            count(trace_worker_provenance_resolution_ratio{namespace="{{ .Release.Namespace }}",rollouts_pod_template_hash="{{`{{args.canary-hash}}`}}"})
+    - name: clickhouse-ingestion-error-rate
+      interval: 30s
+      count: 4
+      successCondition: "result[0] == 0"
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: {{ .Values.rollout.prometheusAddress | quote }}
+          query: |
+            sum(rate(trace_worker_clickhouse_errors_total{namespace="{{ .Release.Namespace }}",rollouts_pod_template_hash="{{`{{args.canary-hash}}`}}"}[2m])) or vector(0)
+    - name: provenance-resolution-slo
+      interval: 30s
+      count: 4
+      successCondition: "result[0] >= 0.999"
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: {{ .Values.rollout.prometheusAddress | quote }}
+          query: |
+            avg(trace_worker_provenance_resolution_ratio{namespace="{{ .Release.Namespace }}",rollouts_pod_template_hash="{{`{{args.canary-hash}}`}}"})
+{{- end }}
