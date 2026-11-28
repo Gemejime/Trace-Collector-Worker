@@ -41,6 +41,7 @@ Write-Host "Deploying '$ReleaseName' (bitnami/redis-cluster) into namespace '$Na
 helm upgrade --install $ReleaseName bitnami/redis-cluster `
     --namespace $Namespace `
     -f $ValuesFile `
+    --set "existingSecret=$SecretName" `
     --wait `
     --timeout 10m
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -57,7 +58,8 @@ $clusterInfo = kubectl exec -n $Namespace "$ReleaseName-0" -- sh -c 'REDISCLI_AU
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $clusterInfo | Out-Host
-if (($clusterInfo -notmatch "cluster_state:ok") -or ($clusterInfo -notmatch "cluster_slots_assigned:16384")) {
+$clusterInfoText = ($clusterInfo -join "`n")
+if (($clusterInfoText -notmatch "cluster_state:ok") -or ($clusterInfoText -notmatch "cluster_slots_assigned:16384")) {
     Write-Error "Redis Cluster verification failed (expected cluster_state:ok and cluster_slots_assigned:16384)."
     exit 1
 }

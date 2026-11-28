@@ -41,6 +41,51 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{- define "rag-trace-collector-worker.telemetryPort" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.worker.telemetryPort (get $env "TELEMETRY_PORT") -}}
+{{- end }}
+
+{{- define "rag-trace-collector-worker.diskWalDir" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.worker.diskWalDir (get $env "DISK_WAL_DIR") -}}
+{{- end }}
+
+{{- define "rag-trace-collector-worker.prometheusMultiprocDir" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.worker.prometheusMultiprocDir (get $env "PROMETHEUS_MULTIPROC_DIR") -}}
+{{- end }}
+
+{{- define "rag-trace-collector-worker.kafkaBootstrapServers" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.kafka.bootstrapServers (get $env "KAFKA_BOOTSTRAP_SERVERS") -}}
+{{- end }}
+
+{{- define "rag-trace-collector-worker.kafkaTopic" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.kafka.topic (get $env "KAFKA_TOPIC") -}}
+{{- end }}
+
+{{- define "rag-trace-collector-worker.kafkaGroupId" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.kafka.groupId (get $env "KAFKA_GROUP_ID") -}}
+{{- end }}
+
+{{- define "rag-trace-collector-worker.kafkaAutoOffsetReset" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.kafka.autoOffsetReset (get $env "KAFKA_AUTO_OFFSET_RESET") -}}
+{{- end }}
+
+{{- define "rag-trace-collector-worker.kafkaSecurityProtocol" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.kafka.securityProtocol (get $env "KAFKA_SECURITY_PROTOCOL") -}}
+{{- end }}
+
+{{- define "rag-trace-collector-worker.kafkaSaslMechanism" -}}
+{{- $env := .Values.env | default dict -}}
+{{- default .Values.kafka.saslMechanism (get $env "KAFKA_SASL_MECHANISM") -}}
+{{- end }}
+
 {{- define "rag-trace-collector-worker.secretEnv" -}}
 {{- if .Values.kafka.secretName }}
 - name: KAFKA_SASL_USERNAME
@@ -71,60 +116,62 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{- define "rag-trace-collector-worker.env" -}}
+{{- $env := .Values.env | default dict -}}
 - name: WORKER_PROCESS_COUNT
-  value: {{ .Values.worker.processCount | quote }}
+  value: {{ default .Values.worker.processCount (get $env "WORKER_PROCESS_COUNT") | quote }}
 - name: GRACEFUL_DRAIN_TIMEOUT_SECONDS
-  value: {{ .Values.worker.gracefulDrainTimeoutSeconds | quote }}
+  value: {{ default .Values.worker.gracefulDrainTimeoutSeconds (get $env "GRACEFUL_DRAIN_TIMEOUT_SECONDS") | quote }}
 - name: LOG_LEVEL
-  value: {{ .Values.worker.logLevel | quote }}
+  value: {{ default .Values.worker.logLevel (get $env "LOG_LEVEL") | quote }}
 - name: TELEMETRY_HOST
-  value: {{ .Values.worker.telemetryHost | quote }}
+  value: {{ default .Values.worker.telemetryHost (get $env "TELEMETRY_HOST") | quote }}
 - name: TELEMETRY_PORT
-  value: {{ .Values.worker.telemetryPort | quote }}
+  value: {{ include "rag-trace-collector-worker.telemetryPort" . | quote }}
 - name: PROMETHEUS_MULTIPROC_DIR
-  value: {{ .Values.worker.prometheusMultiprocDir | quote }}
+  value: {{ include "rag-trace-collector-worker.prometheusMultiprocDir" . | quote }}
 - name: TIMEWHEEL_EXPIRY_SECONDS
-  value: {{ .Values.worker.timewheelExpirySeconds | quote }}
+  value: {{ default .Values.worker.timewheelExpirySeconds (get $env "TIMEWHEEL_EXPIRY_SECONDS") | quote }}
 - name: TIMEWHEEL_TICK_MS
-  value: {{ .Values.worker.timewheelTickMs | quote }}
+  value: {{ default .Values.worker.timewheelTickMs (get $env "TIMEWHEEL_TICK_MS") | quote }}
 - name: TIMEWHEEL_MAX_OPEN_TRACES
-  value: {{ .Values.worker.timewheelMaxOpenTraces | quote }}
+  value: {{ default .Values.worker.timewheelMaxOpenTraces (get $env "TIMEWHEEL_MAX_OPEN_TRACES") | quote }}
 - name: BATCH_MAX_ROWS
-  value: {{ .Values.worker.batchMaxRows | quote }}
+  value: {{ default .Values.worker.batchMaxRows (get $env "BATCH_MAX_ROWS") | quote }}
 - name: BATCH_FLUSH_INTERVAL_SECONDS
-  value: {{ .Values.worker.batchFlushIntervalSeconds | quote }}
+  value: {{ default .Values.worker.batchFlushIntervalSeconds (get $env "BATCH_FLUSH_INTERVAL_SECONDS") | quote }}
 - name: BATCH_MAX_PENDING_BATCHES
-  value: {{ .Values.worker.batchMaxPendingBatches | quote }}
+  value: {{ default .Values.worker.batchMaxPendingBatches (get $env "BATCH_MAX_PENDING_BATCHES") | quote }}
 - name: DISK_WAL_DIR
-  value: {{ .Values.worker.diskWalDir | quote }}
+  value: {{ include "rag-trace-collector-worker.diskWalDir" . | quote }}
 - name: DISK_WAL_MAX_BYTES
-  value: {{ .Values.worker.diskWalMaxBytes | quote }}
+  value: {{ default .Values.worker.diskWalMaxBytes (get $env "DISK_WAL_MAX_BYTES") | quote }}
 - name: DISK_WAL_DRAIN_INTERVAL_SECONDS
-  value: {{ .Values.worker.diskWalDrainIntervalSeconds | quote }}
+  value: {{ default .Values.worker.diskWalDrainIntervalSeconds (get $env "DISK_WAL_DRAIN_INTERVAL_SECONDS") | quote }}
 - name: KAFKA_BOOTSTRAP_SERVERS
-  value: {{ .Values.kafka.bootstrapServers | quote }}
+  value: {{ include "rag-trace-collector-worker.kafkaBootstrapServers" . | quote }}
 - name: KAFKA_TOPIC
-  value: {{ .Values.kafka.topic | quote }}
+  value: {{ include "rag-trace-collector-worker.kafkaTopic" . | quote }}
 - name: KAFKA_TOPIC_PARTITIONS
-  value: {{ .Values.kafka.topicPartitions | quote }}
+  value: {{ default .Values.kafka.topicPartitions (get $env "KAFKA_TOPIC_PARTITIONS") | quote }}
 - name: KAFKA_GROUP_ID
-  value: {{ .Values.kafka.groupId | quote }}
+  value: {{ include "rag-trace-collector-worker.kafkaGroupId" . | quote }}
 - name: KAFKA_AUTO_OFFSET_RESET
-  value: {{ .Values.kafka.autoOffsetReset | quote }}
+  value: {{ include "rag-trace-collector-worker.kafkaAutoOffsetReset" . | quote }}
 - name: KAFKA_SECURITY_PROTOCOL
-  value: {{ .Values.kafka.securityProtocol | quote }}
-{{- if .Values.kafka.saslMechanism }}
+  value: {{ include "rag-trace-collector-worker.kafkaSecurityProtocol" . | quote }}
+{{- $saslMech := include "rag-trace-collector-worker.kafkaSaslMechanism" . }}
+{{- if $saslMech }}
 - name: KAFKA_SASL_MECHANISM
-  value: {{ .Values.kafka.saslMechanism | quote }}
+  value: {{ $saslMech | quote }}
 {{- end }}
 - name: KAFKA_MAX_POLL_INTERVAL_MS
-  value: {{ .Values.kafka.maxPollIntervalMs | quote }}
+  value: {{ default .Values.kafka.maxPollIntervalMs (get $env "KAFKA_MAX_POLL_INTERVAL_MS") | quote }}
 - name: KAFKA_SESSION_TIMEOUT_MS
-  value: {{ .Values.kafka.sessionTimeoutMs | quote }}
+  value: {{ default .Values.kafka.sessionTimeoutMs (get $env "KAFKA_SESSION_TIMEOUT_MS") | quote }}
 - name: KAFKA_HEARTBEAT_INTERVAL_MS
-  value: {{ .Values.kafka.heartbeatIntervalMs | quote }}
+  value: {{ default .Values.kafka.heartbeatIntervalMs (get $env "KAFKA_HEARTBEAT_INTERVAL_MS") | quote }}
 - name: KAFKA_MAX_POLL_RECORDS
-  value: {{ .Values.kafka.maxPollRecords | quote }}
+  value: {{ default .Values.kafka.maxPollRecords (get $env "KAFKA_MAX_POLL_RECORDS") | quote }}
 {{- if .Values.kafka.secretName }}
 - name: KAFKA_SASL_USERNAME
   valueFrom:
@@ -138,15 +185,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       key: password
 {{- end }}
 - name: REDIS_CLUSTER_NODES
-  value: {{ .Values.redis.clusterNodes | quote }}
+  value: {{ default .Values.redis.clusterNodes (get $env "REDIS_CLUSTER_NODES") | quote }}
 - name: REDIS_TLS_ENABLED
-  value: {{ .Values.redis.tlsEnabled | quote }}
+  value: {{ default .Values.redis.tlsEnabled (get $env "REDIS_TLS_ENABLED") | quote }}
 - name: REDIS_LRU_CAPACITY
-  value: {{ .Values.redis.lruCapacity | quote }}
+  value: {{ default .Values.redis.lruCapacity (get $env "REDIS_LRU_CAPACITY") | quote }}
 - name: REDIS_SOCKET_TIMEOUT_SECONDS
-  value: {{ .Values.redis.socketTimeoutSeconds | quote }}
+  value: {{ default .Values.redis.socketTimeoutSeconds (get $env "REDIS_SOCKET_TIMEOUT_SECONDS") | quote }}
 - name: REDIS_PIPELINE_BATCH_SIZE
-  value: {{ .Values.redis.pipelineBatchSize | quote }}
+  value: {{ default .Values.redis.pipelineBatchSize (get $env "REDIS_PIPELINE_BATCH_SIZE") | quote }}
 {{- if .Values.redis.secretName }}
 - name: REDIS_PASSWORD
   valueFrom:
@@ -155,23 +202,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       key: password
 {{- end }}
 - name: CLICKHOUSE_HOST
-  value: {{ .Values.clickhouse.host | quote }}
+  value: {{ default .Values.clickhouse.host (get $env "CLICKHOUSE_HOST") | quote }}
 - name: CLICKHOUSE_PORT
-  value: {{ .Values.clickhouse.port | quote }}
+  value: {{ default .Values.clickhouse.port (get $env "CLICKHOUSE_PORT") | quote }}
 - name: CLICKHOUSE_DATABASE
-  value: {{ .Values.clickhouse.database | quote }}
+  value: {{ default .Values.clickhouse.database (get $env "CLICKHOUSE_DATABASE") | quote }}
 - name: CLICKHOUSE_USER
-  value: {{ .Values.clickhouse.user | quote }}
+  value: {{ default .Values.clickhouse.user (get $env "CLICKHOUSE_USER") | quote }}
 - name: CLICKHOUSE_TLS_ENABLED
-  value: {{ .Values.clickhouse.tlsEnabled | quote }}
+  value: {{ default .Values.clickhouse.tlsEnabled (get $env "CLICKHOUSE_TLS_ENABLED") | quote }}
 - name: CLICKHOUSE_INSERT_DEDUPLICATE
-  value: {{ .Values.clickhouse.insertDeduplicate | quote }}
+  value: {{ default .Values.clickhouse.insertDeduplicate (get $env "CLICKHOUSE_INSERT_DEDUPLICATE") | quote }}
 - name: CLICKHOUSE_ASYNC_INSERT
-  value: {{ .Values.clickhouse.asyncInsert | quote }}
+  value: {{ default .Values.clickhouse.asyncInsert (get $env "CLICKHOUSE_ASYNC_INSERT") | quote }}
 - name: CLICKHOUSE_REPLICATED
-  value: {{ .Values.clickhouse.replicated | quote }}
+  value: {{ default .Values.clickhouse.replicated (get $env "CLICKHOUSE_REPLICATED") | quote }}
 - name: CLICKHOUSE_CLUSTER_NAME
-  value: {{ .Values.clickhouse.clusterName | quote }}
+  value: {{ default .Values.clickhouse.clusterName (get $env "CLICKHOUSE_CLUSTER_NAME") | quote }}
 {{- if .Values.clickhouse.secretName }}
 - name: CLICKHOUSE_PASSWORD
   valueFrom:

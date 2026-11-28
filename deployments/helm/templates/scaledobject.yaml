@@ -1,11 +1,14 @@
 {{- if .Values.keda.enabled }}
-{{- $protocol := .Values.kafka.securityProtocol | default "PLAINTEXT" }}
+{{- $protocol := include "rag-trace-collector-worker.kafkaSecurityProtocol" . | default "PLAINTEXT" }}
 {{- $useTls := or (eq $protocol "SSL") (eq $protocol "SASL_SSL") }}
 {{- $useSasl := or (eq $protocol "SASL_PLAINTEXT") (eq $protocol "SASL_SSL") }}
-{{- if ne $protocol "PLAINTEXT" }}
+{{- if $useSasl }}
 {{- if not (and .Values.keda.triggerAuthentication.enabled .Values.keda.triggerAuthentication.name) }}
-{{- fail "keda.triggerAuthentication.enabled and keda.triggerAuthentication.name are required when kafka.securityProtocol is not PLAINTEXT" }}
+{{- fail "keda.triggerAuthentication.enabled and keda.triggerAuthentication.name are required when kafka.securityProtocol uses SASL" }}
 {{- end }}
+{{- end }}
+{{- if and .Values.keda.triggerAuthentication.enabled (not .Values.keda.triggerAuthentication.name) }}
+{{- fail "keda.triggerAuthentication.name is required when keda.triggerAuthentication.enabled is true" }}
 {{- end }}
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -30,17 +33,17 @@ spec:
   triggers:
     - type: kafka
       metadata:
-        bootstrapServers: {{ .Values.kafka.bootstrapServers | quote }}
-        consumerGroup: {{ .Values.kafka.groupId | quote }}
-        topic: {{ .Values.kafka.topic | quote }}
+        bootstrapServers: {{ include "rag-trace-collector-worker.kafkaBootstrapServers" . | quote }}
+        consumerGroup: {{ include "rag-trace-collector-worker.kafkaGroupId" . | quote }}
+        topic: {{ include "rag-trace-collector-worker.kafkaTopic" . | quote }}
         lagThreshold: {{ .Values.keda.lagThreshold | quote }}
         activationLagThreshold: {{ .Values.keda.activationLagThreshold | quote }}
-        offsetResetPolicy: {{ .Values.kafka.autoOffsetReset | quote }}
+        offsetResetPolicy: {{ include "rag-trace-collector-worker.kafkaAutoOffsetReset" . | quote }}
         {{- if $useTls }}
         tls: "enable"
         {{- end }}
         {{- if $useSasl }}
-        {{- $mech := .Values.kafka.saslMechanism | default "" }}
+        {{- $mech := include "rag-trace-collector-worker.kafkaSaslMechanism" . | default "" }}
         {{- if eq $mech "SCRAM-SHA-256" }}
         sasl: "scram_sha256"
         {{- else if eq $mech "SCRAM-SHA-512" }}
@@ -51,7 +54,7 @@ spec:
         {{- fail (printf "Unsupported kafka.saslMechanism %q for KEDA Kafka trigger" $mech) }}
         {{- end }}
         {{- end }}
-      {{- if ne $protocol "PLAINTEXT" }}
+      {{- if and .Values.keda.triggerAuthentication.enabled .Values.keda.triggerAuthentication.name }}
       authenticationRef:
         name: {{ .Values.keda.triggerAuthentication.name | quote }}
       {{- end }}

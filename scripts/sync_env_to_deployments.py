@@ -112,9 +112,9 @@ def update_values_file(values_path: Path, expected_env: dict[str, str]) -> None:
     env_block = _render_env_block(expected_env)
 
     # Match top-level `env:` section up to the next top-level key or EOF.
-    pattern = re.compile(r"(?ms)^env:[ \t]*\n(?:[ \t]+[^\n]*\n|[ \t]*\n)*")
+    pattern = re.compile(r"(?ms)^env:[ \t]*\n(?:(?:[ \t]+[^\n]*|[ \t]*#[^\n]*|[ \t]*)(?:\n|\Z))*")
     if pattern.search(original_text):
-        updated_text = pattern.sub(env_block, original_text, count=1)
+        updated_text = pattern.sub(lambda _match: env_block, original_text, count=1)
     else:
         separator = "" if original_text.endswith("\n") else "\n"
         updated_text = f"{original_text}{separator}\n{env_block}"

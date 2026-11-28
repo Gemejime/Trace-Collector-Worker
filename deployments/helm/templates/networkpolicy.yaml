@@ -19,7 +19,7 @@ spec:
               {{- toYaml .Values.networkPolicy.prometheusNamespaceSelector | nindent 14 }}
       ports:
         - protocol: TCP
-          port: {{ .Values.worker.telemetryPort }}
+          port: {{ include "rag-trace-collector-worker.telemetryPort" . }}
   egress:
     # Cluster DNS
     - ports:

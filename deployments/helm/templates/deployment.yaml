@@ -39,7 +39,7 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
             - name: telemetry
-              containerPort: {{ .Values.worker.telemetryPort }}
+              containerPort: {{ include "rag-trace-collector-worker.telemetryPort" . }}
               protocol: TCP
           envFrom:
             - configMapRef:
@@ -73,9 +73,9 @@ spec:
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           volumeMounts:
             - name: trace-wal
-              mountPath: {{ .Values.worker.diskWalDir }}
+              mountPath: {{ include "rag-trace-collector-worker.diskWalDir" . }}
             - name: prom-multiproc
-              mountPath: {{ .Values.worker.prometheusMultiprocDir }}
+              mountPath: {{ include "rag-trace-collector-worker.prometheusMultiprocDir" . }}
             - name: tmp
               mountPath: /tmp
       volumes:

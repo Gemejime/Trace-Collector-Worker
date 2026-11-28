@@ -185,6 +185,11 @@ rollout:
               valueFrom:
                 podTemplateHashValue: Latest
 
+# Authoritative runtime configuration:
+# `.Values.env` (synced from `.env.prod` via `scripts/sync_env_to_deployments.py --sync`)
+# is the authoritative source for worker, Kafka, Redis, and ClickHouse runtime settings
+# when keys are present there; top-level `worker`, `kafka`, `redis`, and `clickhouse`
+# keys provide fallback defaults and chart-level metadata (`ports`, `secretName`).
 env:
   secretName: "rag-trace-collector-worker-secret"
   WORKER_PROCESS_COUNT: "4"

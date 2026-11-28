@@ -35,6 +35,7 @@ echo "Deploying '$RELEASE_NAME' (bitnami/redis-cluster) into namespace '$NAMESPA
 helm upgrade --install "$RELEASE_NAME" bitnami/redis-cluster \
   --namespace "$NAMESPACE" \
   -f "$VALUES_FILE" \
+  --set "existingSecret=${SECRET_NAME}" \
   --wait \
   --timeout 10m
 

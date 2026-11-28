@@ -3,11 +3,8 @@
 # Namespace: rag-telemetry
 # Release: rag-trace-collector-worker-redis
 
-global:
-  redis:
-    existingSecret: "rag-trace-collector-worker-secret"
-    existingSecretPasswordKey: "REDIS_PASSWORD"
-
+existingSecret: "rag-trace-collector-worker-secret"
+existingSecretPasswordKey: "REDIS_PASSWORD"
 usePassword: true
 
 cluster:

@@ -12,7 +12,7 @@ This document defines how non-sensitive configuration and sensitive credentials 
 | **Non-Sensitive Deploy Config** | `.env.prod` | No (`.gitignore`) | Yes (`scripts/sync_env_to_deployments.py --sync` → `deployments/helm/values.yaml` → `templates/configmap.yaml`) |
 | **Sensitive Credentials** | GitHub Environment Secrets / Cluster Secrets | Never | Never (excluded by `PASSWORD`, `SECRET`, `TOKEN`, `KEY` filter) |
 
-`scripts/sync_env_to_deployments.py` automatically excludes any key whose name contains `PASSWORD`, `SECRET`, `TOKEN`, or `KEY` so credentials are never written to `deployments/helm/values.yaml` or rendered into `ConfigMap`.
+`scripts/sync_env_to_deployments.py` (`is_sensitive_key`) performs a name-based filter that excludes any key whose name contains `PASSWORD`, `SECRET`, `TOKEN`, or `KEY` from `deployments/helm/values.yaml` and `ConfigMap`. Credentials with other variable names may still be written to `deployments/helm/values.yaml` unless renamed to match the filter or omitted from `.env.prod`.
 
 ---
 
