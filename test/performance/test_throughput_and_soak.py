@@ -8,7 +8,6 @@ import statistics
 import time
 import tracemalloc
 from cmd.worker.process_runner import TracePipeline
-from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -33,12 +32,81 @@ TARGET_AGGREGATE_SPANS_PER_SEC = 12_000.0
 MAX_P95_LATENCY_SECONDS = 2.5
 
 
+_LATENCY_BUCKET_BOUNDS: tuple[float, ...] = (
+    0.001,
+    0.002,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    5.0,
+    10.0,
+    float("inf"),
+)
+
+
+class _LatencyHistogram:
+    """Fixed-memory latency histogram accounting for every completed trace."""
+
+    def __init__(self, counts: list[int] | None = None) -> None:
+        self._counts: list[int] = (
+            list(counts) if counts is not None else [0] * len(_LATENCY_BUCKET_BOUNDS)
+        )
+        self._total: int = sum(self._counts)
+        self._max_observed: float = 0.0
+
+    def observe(self, latency_seconds: float) -> None:
+        if latency_seconds > self._max_observed:
+            self._max_observed = latency_seconds
+        self._total += 1
+        for idx, upper in enumerate(_LATENCY_BUCKET_BOUNDS):
+            if latency_seconds <= upper:
+                self._counts[idx] += 1
+                return
+
+    def reset(self) -> None:
+        for idx in range(len(self._counts)):
+            self._counts[idx] = 0
+        self._total = 0
+        self._max_observed = 0.0
+
+    def copy(self) -> _LatencyHistogram:
+        copied = _LatencyHistogram(self._counts)
+        copied._max_observed = self._max_observed
+        return copied
+
+    def merge(self, other: _LatencyHistogram) -> _LatencyHistogram:
+        merged = _LatencyHistogram(
+            [a + b for a, b in zip(self._counts, other._counts, strict=True)]
+        )
+        merged._max_observed = max(self._max_observed, other._max_observed)
+        return merged
+
+    def p95(self) -> float:
+        if self._total == 0:
+            return 0.0
+        target = min(self._total, max(1, int(0.95 * (self._total - 1)) + 1))
+        cumulative = 0
+        for upper, count in zip(_LATENCY_BUCKET_BOUNDS, self._counts, strict=True):
+            cumulative += count
+            if cumulative >= target:
+                return self._max_observed if upper == float("inf") else upper
+        return self._max_observed
+
+
 class _BenchmarkClickHouseSink:
     def __init__(self, submit_times: dict[str, float]) -> None:
         self.rows_written = 0
         self.last_flush_ts = time.perf_counter()
         self._submit_times = submit_times
-        self.latencies: deque[float] = deque(maxlen=10_000)
+        self.latency_histogram = _LatencyHistogram()
 
     async def insert_graphs(self, graphs: Sequence[ProvenanceGraph]) -> int:
         now = time.perf_counter()
@@ -47,7 +115,7 @@ class _BenchmarkClickHouseSink:
         for graph in graphs:
             submitted = self._submit_times.pop(graph.trace_id, None)
             if submitted is not None:
-                self.latencies.append(now - submitted)
+                self.latency_histogram.observe(now - submitted)
         return len(graphs)
 
 
@@ -61,14 +129,6 @@ def _current_rss_bytes() -> int:
         return rss if os.uname().sysname == "Darwin" else rss * 1024
     except Exception:
         return 0
-
-
-def _p95(samples: list[float]) -> float:
-    if not samples:
-        return 0.0
-    ordered = sorted(samples)
-    idx = min(len(ordered) - 1, max(0, int(0.95 * (len(ordered) - 1))))
-    return ordered[idx]
 
 
 def _setup_worker_pipeline_benchmark(
@@ -123,8 +183,8 @@ async def _run_benchmark_workload(
     duration_seconds: float,
     worker_index: int,
     offset_start: int = 0,
-) -> tuple[int, float, list[float], int]:
-    sink.latencies.clear()
+) -> tuple[int, float, _LatencyHistogram, int]:
+    sink.latency_histogram.reset()
     spans_processed = 0
     offset = offset_start
     start = time.perf_counter()
@@ -153,7 +213,7 @@ async def _run_benchmark_workload(
     await pipeline.flush_pending_emissions()
     await buffer.flush()
     elapsed = max(1e-6, time.perf_counter() - start)
-    return spans_processed, elapsed, list(sink.latencies), offset
+    return spans_processed, elapsed, sink.latency_histogram.copy(), offset
 
 
 async def _run_worker_pipeline_benchmark(
@@ -161,13 +221,13 @@ async def _run_worker_pipeline_benchmark(
     tmp_dir: Path,
     worker_index: int = 0,
     batch_max_rows: int = 1000,
-) -> tuple[int, float, list[float], int]:
+) -> tuple[int, float, _LatencyHistogram, int]:
     tp, offsets, pipeline, buffer, sink, submit_times, _refs = _setup_worker_pipeline_benchmark(
         tmp_dir=tmp_dir,
         worker_index=worker_index,
         batch_max_rows=batch_max_rows,
     )
-    spans_processed, elapsed, latencies, _ = await _run_benchmark_workload(
+    spans_processed, elapsed, histogram, _ = await _run_benchmark_workload(
         tp=tp,
         offsets=offsets,
         pipeline=pipeline,
@@ -179,7 +239,7 @@ async def _run_worker_pipeline_benchmark(
     )
     jemalloc_stats = JemallocStatsScraper().scrape()
     rss_bytes = jemalloc_stats.resident_bytes if jemalloc_stats.available else _current_rss_bytes()
-    return spans_processed, elapsed, latencies, rss_bytes
+    return spans_processed, elapsed, histogram, rss_bytes
 
 
 def _multiprocess_worker_entry(
@@ -190,7 +250,7 @@ def _multiprocess_worker_entry(
 ) -> None:
     import asyncio
 
-    spans, elapsed, latencies, rss_bytes = asyncio.run(
+    spans, elapsed, histogram, rss_bytes = asyncio.run(
         _run_worker_pipeline_benchmark(
             duration_seconds=duration_seconds,
             tmp_dir=Path(tmp_dir_str),
@@ -198,7 +258,7 @@ def _multiprocess_worker_entry(
             batch_max_rows=5000,
         )
     )
-    result_queue.put((spans, elapsed, _p95(latencies), rss_bytes))
+    result_queue.put((spans, elapsed, histogram.p95(), rss_bytes))
 
 
 async def test_pipeline_throughput_and_flat_memory_smoke(
@@ -213,7 +273,7 @@ async def test_pipeline_throughput_and_flat_memory_smoke(
     tracemalloc.start()
     try:
         half = max(0.5, soak_seconds / 2.0)
-        spans_1, elapsed_1, lat_1, next_offset = await _run_benchmark_workload(
+        spans_1, elapsed_1, hist_1, next_offset = await _run_benchmark_workload(
             tp=tp,
             offsets=offsets,
             pipeline=pipeline,
@@ -226,7 +286,7 @@ async def test_pipeline_throughput_and_flat_memory_smoke(
         )
         snap_mid, _ = tracemalloc.get_traced_memory()
 
-        spans_2, elapsed_2, lat_2, _ = await _run_benchmark_workload(
+        spans_2, elapsed_2, hist_2, _ = await _run_benchmark_workload(
             tp=tp,
             offsets=offsets,
             pipeline=pipeline,
@@ -245,7 +305,7 @@ async def test_pipeline_throughput_and_flat_memory_smoke(
     total_elapsed = elapsed_1 + elapsed_2
     assert total_spans > 0
     assert (total_spans / total_elapsed) > 100.0
-    assert _p95(lat_1 + lat_2) <= MAX_P95_LATENCY_SECONDS
+    assert hist_1.merge(hist_2).p95() <= MAX_P95_LATENCY_SECONDS
     assert peak_bytes < MAX_POD_RSS_BYTES
     # Verify heap did not grow unboundedly between first and second half (< 16 MiB delta).
     assert (snap_end - snap_mid) < 16 * 1024 * 1024
