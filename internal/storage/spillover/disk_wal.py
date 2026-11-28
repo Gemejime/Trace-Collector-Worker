@@ -29,6 +29,17 @@ class WalSegment:
     created_at: datetime | None = None
 
 
+def _fsync_dir(path: Path) -> None:
+    """Sync directory metadata on POSIX platforms (no-op on Windows)."""
+    if os.name == "nt":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class DiskWal:
     """Per-worker bounded atomic WAL segment writer and FIFO reader."""
 
@@ -42,7 +53,11 @@ class DiskWal:
         if max_bytes < 1:
             raise ValueError("max_bytes must be >= 1")
         self._worker_dir = Path(wal_dir) / f"worker-{worker_index}"
+        created = not self._worker_dir.exists()
         self._worker_dir.mkdir(parents=True, exist_ok=True)
+        if created:
+            _fsync_dir(self._worker_dir.parent)
+        _fsync_dir(self._worker_dir)
         self._max_bytes = max_bytes
         self._metrics = metrics
         self._logger = get_logger("disk_wal", stage="spillover", worker_index=worker_index)
@@ -139,6 +154,7 @@ class DiskWal:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, final_path)
+        _fsync_dir(self._worker_dir)
 
         self._segments.append(final_path)
         self._current_bytes += len(payload)
@@ -161,6 +177,14 @@ class DiskWal:
                 continue
             try:
                 raw = path.read_bytes()
+            except OSError as exc:
+                self._logger.warning(
+                    "disk_wal_segment_read_failed",
+                    error=type(exc).__name__,
+                )
+                return None
+
+            try:
                 decoded = msgpack.unpackb(raw, raw=False)
                 graphs: list[ProvenanceGraph] = []
                 for g_bytes in decoded["graphs"]:
@@ -198,12 +222,12 @@ class DiskWal:
 
     def ack_segment(self, segment: WalSegment) -> None:
         """Remove a WAL segment after ClickHouse confirms persistence."""
+        segment.path.unlink(missing_ok=True)
         if self._segments and self._segments[0] == segment.path:
             self._segments.pop(0)
         elif segment.path in self._segments:
             self._segments.remove(segment.path)
 
-        segment.path.unlink(missing_ok=True)
         self._current_bytes = max(0, self._current_bytes - segment.size_bytes)
         self._update_metrics()
         self._logger.info(

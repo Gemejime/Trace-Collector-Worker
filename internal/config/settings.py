@@ -60,6 +60,7 @@ class WorkerSettings(BaseSettings):
 
     # Redis 7.2 Cluster provenance cache
     redis_cluster_nodes: str = Field(default="localhost:6379", min_length=1)
+    redis_cluster_enabled: bool = Field(default=True)
     redis_password: SecretStr | None = Field(default=None)
     redis_tls_enabled: bool = Field(default=False)
     redis_ssl_cafile: str | None = Field(default=None)

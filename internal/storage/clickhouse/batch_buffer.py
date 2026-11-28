@@ -140,6 +140,22 @@ class MicroBatchBuffer:
             return 0
         return await self.flush()
 
+    def _spool_or_retain(
+        self,
+        graphs: list[ProvenanceGraph],
+        offsets: list[OffsetRecord],
+        emission_ids: list[int | None],
+        batch_created_at: datetime,
+    ) -> None:
+        """Spool a detached batch to disk WAL, retaining it in memory on failure or quota hit."""
+        try:
+            spooled = self._disk_wal.write_batch(graphs, offsets, created_at=batch_created_at)
+        except Exception:
+            self._overflow_batches.append((graphs, offsets, emission_ids, batch_created_at))
+            raise
+        if not spooled:
+            self._overflow_batches.append((graphs, offsets, emission_ids, batch_created_at))
+
     async def flush(self) -> int:
         """Flush currently buffered records to ClickHouse, spooling to WAL on error."""
         async with self._flush_lock:
@@ -163,8 +179,7 @@ class MicroBatchBuffer:
                     "clickhouse_flush_cancelled_spooling_to_wal",
                     batch_rows=len(graphs),
                 )
-                if not self._disk_wal.write_batch(graphs, offsets, created_at=batch_created_at):
-                    self._overflow_batches.append((graphs, offsets, emission_ids, batch_created_at))
+                self._spool_or_retain(graphs, offsets, emission_ids, batch_created_at)
                 raise
             except Exception as exc:
                 self._logger.warning(
@@ -172,8 +187,7 @@ class MicroBatchBuffer:
                     batch_rows=len(graphs),
                     error=type(exc).__name__,
                 )
-                if not self._disk_wal.write_batch(graphs, offsets, created_at=batch_created_at):
-                    self._overflow_batches.append((graphs, offsets, emission_ids, batch_created_at))
+                self._spool_or_retain(graphs, offsets, emission_ids, batch_created_at)
                 return 0
             finally:
                 self._pending_flush_count = max(0, self._pending_flush_count - 1)

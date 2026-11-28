@@ -505,13 +505,6 @@ async def _run_worker_async(
         metrics=metrics,
     )
     ch_client = ClickHouseNativeClient(settings=settings, metrics=metrics)
-    try:
-        await ch_client.ensure_schemas()
-    except Exception:
-        await provenance_resolver.close()
-        await ch_client.close()
-        raise
-
     pipeline = TracePipeline(
         state_machine=state_machine,
         provenance_resolver=provenance_resolver,
@@ -545,21 +538,8 @@ async def _run_worker_async(
     probe_status: dict[str, bool] = {
         "kafka": False,
         "redis": False,
-        "clickhouse": True,
+        "clickhouse": False,
     }
-    probe_timeout = max(0.5, min(settings.worker_heartbeat_interval_seconds, 2.0))
-    probe_task = asyncio.create_task(
-        _dependency_probe_loop(
-            interval_seconds=settings.worker_heartbeat_interval_seconds,
-            probe_timeout_seconds=probe_timeout,
-            local_stop=local_stop,
-            external_stop_event=stop_event,
-            consumer=consumer,
-            provenance_resolver=provenance_resolver,
-            ch_client=ch_client,
-            probe_status=probe_status,
-        )
-    )
     hb_task = asyncio.create_task(
         _heartbeat_loop(
             heartbeat_queue=heartbeat_queue,
@@ -571,6 +551,30 @@ async def _run_worker_async(
             disk_wal=disk_wal,
             jemalloc_scraper=jemalloc_scraper,
             metrics=metrics,
+            probe_status=probe_status,
+        )
+    )
+    try:
+        await ch_client.ensure_schemas()
+    except Exception:
+        local_stop.set()
+        hb_task.cancel()
+        await asyncio.gather(hb_task, return_exceptions=True)
+        await provenance_resolver.close()
+        await ch_client.close()
+        raise
+
+    probe_status["clickhouse"] = True
+    probe_timeout = max(0.5, min(settings.worker_heartbeat_interval_seconds, 2.0))
+    probe_task = asyncio.create_task(
+        _dependency_probe_loop(
+            interval_seconds=settings.worker_heartbeat_interval_seconds,
+            probe_timeout_seconds=probe_timeout,
+            local_stop=local_stop,
+            external_stop_event=stop_event,
+            consumer=consumer,
+            provenance_resolver=provenance_resolver,
+            ch_client=ch_client,
             probe_status=probe_status,
         )
     )

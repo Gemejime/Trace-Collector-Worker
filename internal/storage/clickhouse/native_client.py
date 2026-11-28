@@ -41,7 +41,7 @@ class ClickHouseNativeClient:
         self._insert_sql = build_insert_sql(settings.clickhouse_database)
         self._logger = get_logger("clickhouse_native_client", stage="storage")
 
-    def _create_client(self) -> Any:
+    def _create_client(self, database: str | None = None) -> Any:
         if self._client_factory is not None:
             return self._client_factory()
         password = (
@@ -52,7 +52,7 @@ class ClickHouseNativeClient:
         kwargs: dict[str, Any] = {
             "host": self._settings.clickhouse_host,
             "port": self._settings.clickhouse_port,
-            "database": self._settings.clickhouse_database,
+            "database": database if database is not None else self._settings.clickhouse_database,
             "user": self._settings.clickhouse_user,
             "password": password,
             "connect_timeout": self._settings.clickhouse_connect_timeout_seconds,
@@ -125,7 +125,32 @@ class ClickHouseNativeClient:
             cluster_name=self._settings.clickhouse_cluster_name,
         )
         async with self._io_lock:
-            for stmt in statements:
+            remaining_statements = statements
+            if (
+                self._client is None
+                and self._client_factory is None
+                and self._settings.clickhouse_database != "default"
+                and statements
+            ):
+                bootstrap_client = self._create_client(database="default")
+                try:
+                    await asyncio.to_thread(bootstrap_client.execute, statements[0])
+                except Exception as exc:
+                    if self._metrics is not None:
+                        self._metrics.inc_clickhouse_errors(type(exc).__name__)
+                    self._logger.error(
+                        "clickhouse_ensure_schemas_failed",
+                        error=type(exc).__name__,
+                    )
+                    raise
+                finally:
+                    disconnect = getattr(bootstrap_client, "disconnect", None)
+                    if callable(disconnect):
+                        with contextlib.suppress(Exception):
+                            disconnect()
+                remaining_statements = statements[1:]
+
+            for stmt in remaining_statements:
                 try:
                     await self._execute_in_thread_locked(stmt)
                 except Exception as exc:

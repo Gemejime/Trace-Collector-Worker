@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import msgpack
+from redis.asyncio import Redis
 from redis.asyncio.cluster import ClusterNode, RedisCluster
 
 from internal.config.settings import WorkerSettings
@@ -165,17 +166,32 @@ class ProvenanceResolver:
                 if self._settings.redis_password is not None
                 else None
             )
-            kwargs: dict[str, Any] = {
-                "startup_nodes": startup_nodes,
-                "password": password,
-                "socket_timeout": self._settings.redis_socket_timeout_seconds,
-                "decode_responses": False,
-            }
-            if self._settings.redis_tls_enabled:
-                kwargs["ssl"] = True
-                if self._settings.redis_ssl_cafile:
-                    kwargs["ssl_ca_certs"] = self._settings.redis_ssl_cafile
-            self._client = RedisCluster(**kwargs)
+            if self._settings.redis_cluster_enabled:
+                kwargs: dict[str, Any] = {
+                    "startup_nodes": startup_nodes,
+                    "password": password,
+                    "socket_timeout": self._settings.redis_socket_timeout_seconds,
+                    "decode_responses": False,
+                }
+                if self._settings.redis_tls_enabled:
+                    kwargs["ssl"] = True
+                    if self._settings.redis_ssl_cafile:
+                        kwargs["ssl_ca_certs"] = self._settings.redis_ssl_cafile
+                self._client = RedisCluster(**kwargs)
+            else:
+                primary = startup_nodes[0]
+                standalone_kwargs: dict[str, Any] = {
+                    "host": primary.host,
+                    "port": primary.port,
+                    "password": password,
+                    "socket_timeout": self._settings.redis_socket_timeout_seconds,
+                    "decode_responses": False,
+                }
+                if self._settings.redis_tls_enabled:
+                    standalone_kwargs["ssl"] = True
+                    if self._settings.redis_ssl_cafile:
+                        standalone_kwargs["ssl_ca_certs"] = self._settings.redis_ssl_cafile
+                self._client = Redis(**standalone_kwargs)
         return self._client
 
     async def _fetch_doc_group(
