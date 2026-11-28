@@ -150,9 +150,14 @@ class MicroBatchBuffer:
         """Spool a detached batch to disk WAL, retaining it in memory on failure or quota hit."""
         try:
             spooled = self._disk_wal.write_batch(graphs, offsets, created_at=batch_created_at)
-        except Exception:
+        except Exception as exc:
+            self._logger.warning(
+                "disk_wal_write_failed_retaining_in_memory",
+                batch_rows=len(graphs),
+                error=type(exc).__name__,
+            )
             self._overflow_batches.append((graphs, offsets, emission_ids, batch_created_at))
-            raise
+            return
         if not spooled:
             self._overflow_batches.append((graphs, offsets, emission_ids, batch_created_at))
 

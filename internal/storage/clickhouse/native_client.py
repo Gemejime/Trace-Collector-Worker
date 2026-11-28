@@ -38,6 +38,7 @@ class ClickHouseNativeClient:
         self._owns_client = client is None
         self._metrics = metrics
         self._io_lock = asyncio.Lock()
+        self._inflight_ping_task: asyncio.Task[bool] | None = None
         self._insert_sql = build_insert_sql(settings.clickhouse_database)
         self._logger = get_logger("clickhouse_native_client", stage="storage")
 
@@ -200,8 +201,7 @@ class ClickHouseNativeClient:
             self._metrics.observe_clickhouse_flush_duration(duration_s)
         return len(rows)
 
-    async def ping(self) -> bool:
-        """Verify ClickHouse native TCP connectivity for readiness probes."""
+    async def _run_ping_locked(self) -> bool:
         async with self._io_lock:
             try:
                 result = await self._execute_in_thread_locked("SELECT 1")
@@ -213,7 +213,24 @@ class ClickHouseNativeClient:
                 self._reset_client()
                 return False
 
+    async def ping(self, timeout_seconds: float | None = None) -> bool:
+        """Verify ClickHouse native TCP connectivity for readiness probes."""
+        if timeout_seconds is None:
+            return await self._run_ping_locked()
+
+        if self._inflight_ping_task is None or self._inflight_ping_task.done():
+            self._inflight_ping_task = asyncio.create_task(self._run_ping_locked())
+        task = self._inflight_ping_task
+        done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
+        if task in done:
+            return task.result()
+        return False
+
     async def close(self) -> None:
         """Disconnect the owned ClickHouse native TCP client."""
+        if self._inflight_ping_task is not None and not self._inflight_ping_task.done():
+            self._inflight_ping_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self._inflight_ping_task
         async with self._io_lock:
             self._reset_client()

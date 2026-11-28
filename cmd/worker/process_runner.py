@@ -376,20 +376,26 @@ async def _dependency_probe_loop(
     ch_client: ClickHouseNativeClient,
     probe_status: dict[str, bool],
 ) -> None:
+    async def _probe_one(name: str, coro: Any) -> None:
+        probe_status[name] = await _bounded_ping(coro, probe_timeout_seconds)
+
+    async def _probe_clickhouse() -> None:
+        try:
+            probe_status["clickhouse"] = await ch_client.ping(timeout_seconds=probe_timeout_seconds)
+        except Exception:
+            probe_status["clickhouse"] = False
+
     while not local_stop.is_set() and not (
         external_stop_event is not None and external_stop_event.is_set()
     ):
-        kafka_ok, redis_ok, ch_ok = await asyncio.gather(
-            _bounded_ping(
+        await asyncio.gather(
+            _probe_one(
+                "kafka",
                 consumer.check_health(timeout_seconds=probe_timeout_seconds),
-                probe_timeout_seconds,
             ),
-            _bounded_ping(provenance_resolver.ping(), probe_timeout_seconds),
-            _bounded_ping(ch_client.ping(), probe_timeout_seconds),
+            _probe_one("redis", provenance_resolver.ping()),
+            _probe_clickhouse(),
         )
-        probe_status["kafka"] = kafka_ok
-        probe_status["redis"] = redis_ok
-        probe_status["clickhouse"] = ch_ok
         await asyncio.sleep(interval_seconds)
 
 

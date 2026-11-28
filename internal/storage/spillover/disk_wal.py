@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -154,7 +155,12 @@ class DiskWal:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, final_path)
-        _fsync_dir(self._worker_dir)
+        try:
+            _fsync_dir(self._worker_dir)
+        except Exception:
+            with contextlib.suppress(OSError):
+                final_path.unlink(missing_ok=True)
+            raise
 
         self._segments.append(final_path)
         self._current_bytes += len(payload)
