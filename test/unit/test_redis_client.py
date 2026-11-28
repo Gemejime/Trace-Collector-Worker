@@ -109,3 +109,15 @@ async def test_resolver_l1_l2_slot_grouped_and_missing_fallback() -> None:
     assert cached_result.hits == 2
     assert cached_result.misses == 0
     assert len(fake_redis.mget_calls) == calls_before
+
+
+def test_resolver_creates_standalone_client_when_cluster_disabled() -> None:
+    from redis.asyncio import Redis
+
+    settings = WorkerSettings(
+        redis_cluster_nodes="localhost:6379",
+        redis_cluster_enabled=False,
+    )
+    resolver = ProvenanceResolver(settings=settings)
+    client = resolver._get_or_create_client()
+    assert isinstance(client, Redis)

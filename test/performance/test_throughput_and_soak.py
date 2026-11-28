@@ -8,6 +8,7 @@ import statistics
 import time
 import tracemalloc
 from cmd.worker.process_runner import TracePipeline
+from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,7 @@ class _BenchmarkClickHouseSink:
         self.rows_written = 0
         self.last_flush_ts = time.perf_counter()
         self._submit_times = submit_times
-        self.latencies: list[float] = []
+        self.latencies: deque[float] = deque(maxlen=10_000)
 
     async def insert_graphs(self, graphs: Sequence[ProvenanceGraph]) -> int:
         now = time.perf_counter()
@@ -123,7 +124,7 @@ async def _run_benchmark_workload(
     worker_index: int,
     offset_start: int = 0,
 ) -> tuple[int, float, list[float], int]:
-    lat_start_idx = len(sink.latencies)
+    sink.latencies.clear()
     spans_processed = 0
     offset = offset_start
     start = time.perf_counter()
@@ -152,7 +153,7 @@ async def _run_benchmark_workload(
     await pipeline.flush_pending_emissions()
     await buffer.flush()
     elapsed = max(1e-6, time.perf_counter() - start)
-    return spans_processed, elapsed, list(sink.latencies[lat_start_idx:]), offset
+    return spans_processed, elapsed, list(sink.latencies), offset
 
 
 async def _run_worker_pipeline_benchmark(

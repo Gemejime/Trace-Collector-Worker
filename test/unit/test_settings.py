@@ -141,6 +141,10 @@ def test_dotenv_example_covers_all_worker_settings_and_validates(
     missing_fields = set(WorkerSettings.model_fields.keys()) - declared_keys
     assert not missing_fields, f"Missing fields in .env.example: {sorted(missing_fields)}"
 
+    for field_name in WorkerSettings.model_fields:
+        monkeypatch.delenv(field_name.upper(), raising=False)
+    for field_name in WorkerSettings.model_fields:
+        monkeypatch.delenv(field_name.upper(), raising=False)
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(example_text, encoding="utf-8")
     loaded = WorkerSettings()

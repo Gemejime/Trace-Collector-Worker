@@ -81,3 +81,41 @@ def test_sync_and_check_only_preserve_blocks_and_secret_name(tmp_path: Path) -> 
         "KAFKA_TOPIC": "rag-diagnostic-traces",
         "PROMETHEUS_MULTIPROC_DIR": "",
     }
+
+
+def test_sync_preserves_env_with_unindented_comment_and_backslashes(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env.prod"
+    env_file.write_text(
+        "WORKER_PROCESS_COUNT=8\nWIN_PATH=C:\\temp\\wal\n",
+        encoding="utf-8",
+    )
+
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(
+        "\n".join(
+            [
+                "replicaCount: 4",
+                "env:",
+                '  secretName: "prod-secrets"',
+                '  WORKER_PROCESS_COUNT: "2"',
+                "# unindented comment inside env block",
+                '  WORKER_PROCESS_COUNT: "1"',
+                '  LEGACY_KEY: "stale"',
+                "keda:",
+                "  enabled: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert run_sync(env_file, values_file, check_only=False) == 0
+    updated_text = values_file.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(updated_text)
+    assert parsed["keda"]["enabled"] is True
+    assert parsed["env"] == {
+        "secretName": "prod-secrets",
+        "WORKER_PROCESS_COUNT": "8",
+        "WIN_PATH": "C:\\temp\\wal",
+    }
+    assert "LEGACY_KEY" not in updated_text

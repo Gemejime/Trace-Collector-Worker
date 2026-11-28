@@ -57,3 +57,41 @@ def test_disk_wal_enforces_byte_quota_without_dropping(tmp_path: Path) -> None:
     second = wal.write_batch([_graph("trace-second-overflow-padding")], [(tp, 1, 1)])
     assert second is False
     assert wal.spillover_active is True
+
+
+def test_disk_wal_read_error_does_not_quarantine_and_unlink_failure_retains_segment(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import pytest
+
+    mp = pytest.MonkeyPatch()
+    wal = DiskWal(wal_dir=tmp_path, worker_index=0, max_bytes=1024 * 1024)
+    tp = TopicPartition("rag-diagnostic-traces", 0)
+    assert wal.write_batch([_graph("t-retry")], [(tp, 5, 1)]) is True
+    seg_path = wal._segments[0]
+
+    def _raise_oserror(self: Path) -> bytes:
+        raise OSError("transient read error")
+
+    mp.setattr(Path, "read_bytes", _raise_oserror)
+    assert wal.peek_oldest() is None
+    assert seg_path.exists()
+    assert not seg_path.with_suffix(".corrupt").exists()
+    mp.undo()
+
+    seg = wal.peek_oldest()
+    assert seg is not None
+
+    def _raise_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise OSError("unlink failed")
+
+    mp.setattr(Path, "unlink", _raise_unlink)
+    with pytest.raises(OSError):
+        wal.ack_segment(seg)
+    assert wal.pending_segments == 1
+    assert wal.total_bytes == seg.size_bytes
+    mp.undo()
+
+    wal.ack_segment(seg)
+    assert wal.pending_segments == 0
+    assert wal.total_bytes == 0
